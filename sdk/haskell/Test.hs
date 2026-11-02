@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
--- runghc Test.hs   (BEEP_GATEWAY env var; needs http-client and http-types)
+-- runghc Test.hs   (BEEP_GATEWAY env var; needs bytestring, http-client and http-types)
 import Beep
 import Control.Exception (try)
 import Control.Monad (unless)

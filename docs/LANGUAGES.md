@@ -24,7 +24,7 @@
 | F# / VB.NET | 复用 .NET 库 | ✓ | ✓ | ✓ | — | ✅ W L（`examples/fsharp`、`examples/vbnet`） |
 | PowerShell | 复用 .NET 库 | ✓ | — | ✓ | — | 通过 `Add-Type` 使用；网关 SDK ✅ W L |
 | Go 1.21+ | `native/go` | ✓ | ✓ | ✓ crypto/tls | `http.Handler`（Gin/Echo/Chi/mux）、`http.RoundTripper`（任何用 `http.Client` 的代码） | ✅ W L（W 含 `-race`） |
-| Kotlin / Scala 3 / Groovy / Clojure | 复用 Java 库（`examples/jvm`） | ✓ | ✓ | ✓ | — | ✅ L（Kotlin 2.4、Scala 3.3、Groovy 6、Clojure 1.11） |
+| Kotlin / Scala 3 / Groovy / Clojure | 复用 Java 库（`examples/jvm`） | ✓ | ✓ | ✓ | — | ✅ W L（Kotlin 2.4、Scala 3.3、Groovy 6、Clojure 1.12 / 1.11） |
 
 ## B. C ABI（`core/ffi/include/beep.h`）
 
@@ -36,14 +36,14 @@
 | Ruby | `bindings/ruby`（Fiddle，标准库） | ✓ | —（服务端用 expose） | ✅ W L |
 | PHP 7.4+ | `bindings/php`（ext-ffi） | ✓ | — | ✅ W L |
 | Zig | `bindings/zig` | ✓ | — | ✅ W L（Zig 0.17） |
-| LuaJIT | `bindings/luajit` | ✓ | — | ✅ L（2.1） |
-| Swift | `bindings/swift`（SwiftPM，含 `beep-test`） | ✓ | — | ✅ L（6.4） |
-| Nim | `bindings/nim` | ✓ | — | ✅ L（1.6） |
-| Dart / Flutter | `bindings/dart`（需 `package:ffi`） | ✓ | — | ✅ L（Dart 3.13；Flutter 未测） |
-| Julia | `bindings/julia` | ✓ | — | ✅ L（1.13） |
-| Free Pascal / Delphi | `bindings/pascal` | ✓ | — | ✅ L（FPC 3.2；Delphi 未测） |
-| D | `bindings/d` | ✓ | — | ✅ L（LDC 1.36） |
-| COBOL（GnuCOBOL） | `bindings/cobol` | ✓ | — | ✅ L（GnuCOBOL 3.1） |
+| LuaJIT | `bindings/luajit` | ✓ | — | ✅ W L（2.1） |
+| Swift | `bindings/swift`（SwiftPM，含 `beep-test`） | ✓ | — | ✅ W L（6.4） |
+| Nim | `bindings/nim` | ✓ | — | ✅ W L（W 2.4，L 1.6） |
+| Dart / Flutter | `bindings/dart`（需 `package:ffi`） | ✓ | — | ✅ W L（Dart 3.13；Flutter 未测） |
+| Julia | `bindings/julia` | ✓ | — | ✅ W L（1.13） |
+| Free Pascal / Delphi | `bindings/pascal` | ✓ | — | ✅ W L（FPC 3.2；Delphi 未测） |
+| D | `bindings/d` | ✓ | — | ✅ W L（LDC：W 1.43，L 1.36） |
+| COBOL（GnuCOBOL） | `bindings/cobol` | ✓ | — | ✅ W L（GnuCOBOL：W 3.2，L 3.1） |
 | Objective-C、Ada、Haskell、OCaml、V、Odin… | 直接用 `beep.h` 走各自 C FFI | ✓ | ✓ | — |
 
 ## C. 网关（`beepgw proxy` / `beepgw run`）
@@ -59,13 +59,13 @@
 | PHP（无 FFI 环境） | `sdk/php` | ✅ W L |
 | Ruby（无 FFI 环境） | `sdk/ruby` | ✅ W L |
 | TCP JSON-Lines | 协议见 `docs/PROTOCOL.md §3.2` | ✅ W L |
-| R | `sdk/r`（`curl` 包） | ✅ L（R 4.3） |
-| Elixir | `sdk/elixir`（OTP `:httpc`） | ✅ L（1.14） |
-| Erlang | `sdk/erlang`（`inets`） | ✅ L（OTP 25） |
-| Haskell | `sdk/haskell`（http-client） | ✅ L（GHC 9.4） |
-| Crystal | `sdk/crystal`（标准库） | ✅ L（1.22） |
-| Lua 5.x | `sdk/lua`（LuaSocket） | ✅ L（5.4） |
-| OCaml | `sdk/ocaml`（cohttp-lwt-unix，链接需 `-thread`） | ✅ L（4.14） |
+| R | `sdk/r`（`curl` 包） | ✅ W L（R：W 4.6，L 4.3） |
+| Elixir | `sdk/elixir`（OTP `:httpc`） | ✅ W L（W 1.20，L 1.14） |
+| Erlang | `sdk/erlang`（`inets`） | ✅ W L（OTP：W 29，L 25） |
+| Haskell | `sdk/haskell`（http-client） | ✅ W L（GHC：W 9.10，L 9.4） |
+| Crystal | `sdk/crystal`（标准库） | ✅ W L（1.22） |
+| Lua 5.x | `sdk/lua`（LuaSocket） | ✅ W L（5.4） |
+| OCaml | `sdk/ocaml`（cohttp-lwt-unix，链接需 `-thread`） | ✅ W L（W 5.4 + cohttp 6.3，L 4.14 + cohttp 5.3） |
 | 其它（Kotlin/Swift/Dart 的 HTTP 客户端、ABAP、MATLAB、LabVIEW、Excel VBA……） | 直接发 HTTP 到网关 | — |
 
 ## 入向：现有后端零改动挂到 BEEP

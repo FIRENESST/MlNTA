@@ -134,6 +134,8 @@ def build(t):
 
 
 def main():
+    # Tool output may hold characters the console code page (e.g. GBK) cannot encode.
+    sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", action="store_true")
     args = ap.parse_args()
@@ -141,7 +143,7 @@ def main():
     t["gxx"] = tool("gxx", "g++")
     t["gfortran"] = tool("gfortran")
     t["sh"] = tool("sh", "bash")
-    for k in ("luajit", "nim", "fpc", "julia", "dart", "swift", "cobc", "elixir", "erlc", "erl", "runghc", "crystal",
+    for k in ("luajit", "nim", "fpc", "julia", "dart", "swift", "cobc", "cobcrun", "elixir", "erlc", "erl", "runghc", "crystal",
               "ocamlfind", "kotlinc", "scalac", "groovy", "clojure"):
         t[k] = tool(k)
     t["ldc2"] = tool("ldc2", "ldmd2")
@@ -252,12 +254,12 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         implib = [str(RELEASE / "beep.dll.lib")] if WIN else [f"-L{RELEASE}", "-lbeep"]
 
-        def case(group, name, key, steps, cmd, cwd=None, marker="all tests passed", timeout=900):
+        def case(group, name, key, steps, cmd, cwd=None, marker="all tests passed", timeout=900, env=None):
             """Build with `steps` (each a command), then run `cmd`; skipped when tool `key` is missing."""
             if not t[key]:
                 skip(group, name, f"{key} not found")
                 return
-            env = {**libpath, "BEEP_ECHO": echo, "BEEP_GATEWAY": gateway}
+            env = {**libpath, "BEEP_ECHO": echo, "BEEP_GATEWAY": gateway, **(env or {})}
             for step in steps:
                 rc, out = run(step, cwd=cwd, env=env, timeout=timeout)
                 if rc != 0:
@@ -275,16 +277,39 @@ def main():
                                          f"-od={out_dir / 'd_obj'}", *(implib if WIN else [f"-L-L{RELEASE}", "-L-lbeep"])]],
              [str(out_dir / f"test_d{EXE}"), echo], cwd=b / "d")
         (out_dir / "fpc").mkdir(exist_ok=True)
-        case("ffi", "Free Pascal", "fpc", [[t["fpc"], "-Fu.", f"-FU{out_dir / 'fpc'}", f"-o{out_dir / ('test_pascal' + EXE)}",
-                                            *([] if WIN else [f"-Fl{RELEASE}"]), "test_beep.pas"]],
+        # The Windows fpc driver defaults to i386; beep.dll is 64-bit.
+        case("ffi", "Free Pascal", "fpc", [[t["fpc"], *(["-Px86_64"] if WIN else [f"-Fl{RELEASE}"]), "-Fu.", f"-FU{out_dir / 'fpc'}",
+                                            f"-o{out_dir / ('test_pascal' + EXE)}", "test_beep.pas"]],
              [str(out_dir / f"test_pascal{EXE}"), echo], cwd=b / "pascal")
         case("ffi", "Julia", "julia", [], [t["julia"], "--startup-file=no", str(b / "julia/test_beep.jl"), echo])
         case("ffi", "Dart", "dart", [[t["dart"], "pub", "get"]], [t["dart"], "run", "test_beep.dart", echo], cwd=b / "dart")
-        case("ffi", "Swift", "swift", [[t["swift"], "build", "--package-path", str(b / "swift"), "--scratch-path", str(out_dir / "swift"),
-                                        "-Xlinker", f"-L{RELEASE}"]],
+        # Windows: Rust writes a static beep.lib next to the import library beep.dll.lib, and `link "beep"`
+        # would pick the static one, so give Swift a directory holding only the import library.
+        swift_lib = RELEASE
+        if WIN:
+            swift_lib = out_dir / "implib"
+            swift_lib.mkdir(exist_ok=True)
+            if (RELEASE / "beep.dll.lib").exists():
+                shutil.copy(RELEASE / "beep.dll.lib", swift_lib / "beep.lib")
+        # Swift Build (SwiftPM's default) gives swift-frontend a clean environment; toolchains that need
+        # MIMALLOC_DISABLE_REDIRECT to start must use the native build system, which passes it through.
+        native = ["--build-system", "native"] if os.environ.get("MIMALLOC_DISABLE_REDIRECT") else []
+        case("ffi", "Swift", "swift", [[t["swift"], "build", *native, "--package-path", str(b / "swift"),
+                                        "--scratch-path", str(out_dir / "swift"), "-Xlinker", f"-L{swift_lib}"]],
              [str(out_dir / "swift/debug" / f"beep-test{EXE}"), echo])
-        case("ffi", "COBOL (GnuCOBOL)", "cobc", [[t["cobc"], "-x", "-o", str(out_dir / f"test_cobol{EXE}"), "beep-demo.cob", *implib]],
-             [str(out_dir / f"test_cobol{EXE}")], cwd=b / "cobol")
+        # Built as a module and run by cobcrun: cobcrun sits next to libcob, so on Windows libcob's DLLs load
+        # from there rather than from other MinGW copies earlier on PATH.
+        # -std=gnu17: GnuCOBOL 3.x emits K&R `extern int f();` prototypes, which C23 (GCC 15+ default) rejects.
+        cob_dir = out_dir / "cobol"
+        cob_dir.mkdir(exist_ok=True)
+        cob_link = ["-Q", str(RELEASE / "beep.dll.lib")] if WIN else [f"-L{RELEASE}", "-lbeep"]
+        if t["cobc"] and not t["cobcrun"]:
+            skip("ffi", "COBOL (GnuCOBOL)", "cobcrun not found")
+        else:
+            case("ffi", "COBOL (GnuCOBOL)", "cobc",
+                 [[t["cobc"], "-m", "-A", "-std=gnu17", *cob_link, "-o", str(cob_dir / ("BEEP-DEMO" + (".dll" if WIN else ".so"))),
+                   "beep-demo.cob"]],
+                 [t["cobcrun"], "BEEP-DEMO"], cwd=b / "cobol", env={"COB_LIBRARY_PATH": str(cob_dir)})
 
         # ---- gateway (HTTP / JSON-lines) SDKs ------------------------------------------------
         genv = {"BEEP_GATEWAY": gateway, "MSYS_NO_PATHCONV": "1"}

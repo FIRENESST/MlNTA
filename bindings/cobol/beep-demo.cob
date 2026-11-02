@@ -1,6 +1,10 @@
       * beep-demo.cob - GnuCOBOL calling libbeep's simple C ABI.
-      *   cobc -x beep-demo.cob -lbeep
+      *   cobc -x -A -std=gnu17 beep-demo.cob -lbeep
       *   BEEP_ECHO=127.0.0.1:10288 ./beep-demo
+      * or as a module (what tests/run_all.py does):
+      *   cobc -m -A -std=gnu17 -lbeep beep-demo.cob && cobcrun BEEP-DEMO
+      * -A -std=gnu17: GnuCOBOL 3.x emits K&R C prototypes that the
+      * C23 default of GCC 15+ rejects.
       * Mainframe COBOL without dynamic C calls: use the gateway's
       * TCP JSON-lines port (docs/PROTOCOL.md section 3.2) instead.
        IDENTIFICATION DIVISION.

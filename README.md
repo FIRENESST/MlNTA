@@ -168,7 +168,14 @@ python tests/run_all.py --build
 | 平台 | 结果 | 工具链 |
 |---|---|---|
 | Ubuntu 24.04（WSL2） | **66 通过，0 失败，0 跳过** | Rust 1.99 / Python 3.12 / Node 18 / JDK 21 / .NET 8 / Go 1.22 / PHP 8.3 / Ruby 3.2 / Zig 0.17 / GCC 13，以及 LuaJIT、Swift 6.4、Nim、Dart 3.13、Julia 1.13、FPC、LDC、GnuCOBOL、R、Elixir、Erlang、GHC、Crystal、Lua、OCaml、Kotlin、Scala 3、Groovy、Clojure |
-| Windows 11 | **47 通过，0 失败**（缺工具链的 19 项跳过） | Rust 1.98 / Python 3.13 / Node 24 / JDK 21 / .NET 10 / Go 1.27 / PHP 8.5 / Ruby 4.0 / Zig 0.17 / GCC 16 |
+| Windows 11 | **66 通过，0 失败，0 跳过** | Rust 1.98 / Python 3.13 / Node 24 / JDK 21 / .NET 10 / Go 1.27 / PHP 8.5 / Ruby 4.0 / Zig 0.17 / GCC 16，以及 LuaJIT、Swift 6.4、Nim 2.4、Dart 3.13、Julia 1.13、FPC 3.2、LDC 1.43、GnuCOBOL 3.2、R 4.6、Elixir 1.20、Erlang/OTP 29、GHC 9.10、Crystal 1.22、Lua 5.4、OCaml 5.4、Kotlin、Scala 3、Groovy、Clojure |
+
+Windows 上补齐工具链时的几个坑（`tests/run_all.py` 已处理或注明）：
+
+- **Free Pascal**：Windows 的 `fpc` 驱动默认出 32 位程序，加载不了 64 位 `beep.dll`，需 `-Px86_64`。
+- **Swift**：Rust 在同目录同时产出静态库 `beep.lib` 和导入库 `beep.dll.lib`，要让 Swift 链导入库；若 `swift` 启动即崩（`0xC0000142`），设 `MIMALLOC_DISABLE_REDIRECT=1`，此时测试改用 `--build-system native`（默认构建系统不把该变量传给 `swift-frontend`）。
+- **GnuCOBOL**：3.x 生成 K&R 风格 C 原型，GCC 15+ 默认 C23 会拒绝，需 `-A -std=gnu17`；测试以 `cobc -m` + `cobcrun` 运行，避免 PATH 上其它 MinGW 的同名 DLL 抢先加载。
+- **Haskell**：用 cabal 包环境时，除 `http-client`、`http-types` 外还要暴露 `bytestring`。
 
 ## 目录
 
