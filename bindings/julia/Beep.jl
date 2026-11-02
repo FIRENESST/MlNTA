@@ -1,4 +1,4 @@
-# Beep.jl — Julia binding to libbeep via ccall. NOT verified locally (no Julia here).
+# Beep.jl — Julia binding to libbeep via ccall. Test: test_beep.jl.
 #   include("Beep.jl"); c = Beep.Client("127.0.0.1:10288")
 #   r = Beep.call(c, "POST", "/echo", "Content-Type: text/plain", "hi"); String(r.body)
 module Beep

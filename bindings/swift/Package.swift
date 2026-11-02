@@ -1,6 +1,6 @@
 // swift-tools-version:5.7
-// Swift binding to libbeep. NOT verified locally (no Swift toolchain here).
-// Build: swift build -Xlinker -L/path/to/libbeep
+// Swift binding to libbeep.
+// Build: swift build -Xlinker -L/path/to/libbeep    Test: .build/debug/beep-test 127.0.0.1:10288
 import PackageDescription
 
 let package = Package(
@@ -9,5 +9,6 @@ let package = Package(
     targets: [
         .systemLibrary(name: "CBeep", path: "Sources/CBeep"),
         .target(name: "Beep", dependencies: ["CBeep"]),
+        .executableTarget(name: "beep-test", dependencies: ["Beep"]),
     ]
 )

@@ -29,8 +29,10 @@
 | 方式 | 覆盖 | 说明 |
 |---|---|---|
 | **原生库** | Rust、Python、Node.js/TS、Java（及 Kotlin/Scala/Groovy/Clojure）、C#/F#/VB.NET、Go | 纯本语言实现，无外部依赖，客户端 + 服务端 + TLS |
-| **C ABI `libbeep`** | C、C++、Fortran、Ruby、PHP、Zig（已测）；LuaJIT、Swift、Nim、Dart、Julia、Pascal、D、COBOL（已写） | Rust 核心导出的 C 接口，原生 BEEP 性能 |
-| **网关 `beepgw`** | **任何能发 HTTP 的语言**（零代码）；另有 TCP JSON-Lines | 加 SDK：Shell、PowerShell、Perl、Tcl、PHP、Ruby（已测）；R、Elixir、Erlang、Haskell、Crystal、Lua、OCaml（已写） |
+| **C ABI `libbeep`** | C、C++、Fortran、Ruby、PHP、Zig、LuaJIT、Swift、Nim、Dart、Julia、Free Pascal、D、COBOL | Rust 核心导出的 C 接口，原生 BEEP 性能 |
+| **网关 `beepgw`** | **任何能发 HTTP 的语言**（零代码）；另有 TCP JSON-Lines | 加 SDK：Shell、PowerShell、Perl、Tcl、PHP、Ruby、R、Elixir、Erlang、Haskell、Crystal、Lua、OCaml |
+
+以上全部有测试并实际跑通，平台见 [docs/LANGUAGES.md](docs/LANGUAGES.md)。
 
 入向：`beepgw expose` 让**任何语言的现成 HTTP 服务**零改动挂到 BEEP；Python（ASGI/WSGI）、Node（Express 等）、Go（`net/http`）还能在进程内直接服务 BEEP。
 
@@ -159,9 +161,14 @@ BEEP 层失败时返回映射后的 HTTP 状态 + `X-Beep-Error-Code` + `{"error
 python tests/run_all.py --build
 ```
 
-一条命令构建并运行全部测试：Rust 核心单元/集成测试、6 个原生库各自的全套用例（与 Rust 服务端互通 + 本语言自通 + 极小窗口大消息 + 流水线 + ANS 流 + 中止 + ERR + 超时回收 + TLS 双向）、6 个 FFI 绑定、6 个网关 SDK、JSON-Lines、入向链路，以及 **4 种客户端 × 6 种服务端** 的跨语言矩阵。
+一条命令构建并运行全部测试：Rust 核心单元/集成测试、6 个原生库各自的全套用例（与 Rust 服务端互通 + 本语言自通 + 极小窗口大消息 + 流水线 + ANS 流 + 中止 + ERR + 超时回收 + TLS 双向）、14 个 FFI 绑定、13 个网关 SDK、4 种 JVM 语言、JSON-Lines、入向链路，以及 **4 种客户端 × 6 种服务端** 的跨语言矩阵。找不到工具链的语言自动跳过。
 
-本机最近一次结果：**47 项全部通过，0 失败，0 跳过**（Windows 11，Rust 1.98 / Python 3.13 / Node 24 / JDK 21 / .NET 10 / Go 1.27 / PHP 8.5 / Ruby 4.0 / Zig 0.17 / GCC 16）。
+最近一次结果：
+
+| 平台 | 结果 | 工具链 |
+|---|---|---|
+| Ubuntu 24.04（WSL2） | **66 通过，0 失败，0 跳过** | Rust 1.99 / Python 3.12 / Node 18 / JDK 21 / .NET 8 / Go 1.22 / PHP 8.3 / Ruby 3.2 / Zig 0.17 / GCC 13，以及 LuaJIT、Swift 6.4、Nim、Dart 3.13、Julia 1.13、FPC、LDC、GnuCOBOL、R、Elixir、Erlang、GHC、Crystal、Lua、OCaml、Kotlin、Scala 3、Groovy、Clojure |
+| Windows 11 | **47 通过，0 失败**（缺工具链的 19 项跳过） | Rust 1.98 / Python 3.13 / Node 24 / JDK 21 / .NET 10 / Go 1.27 / PHP 8.5 / Ruby 4.0 / Zig 0.17 / GCC 16 |
 
 ## 目录
 
@@ -183,5 +190,5 @@ tests/           run_all.py（总测试）backend.py clients/
 - **TLS**：采用标准 TLS 调谐 profile，在会话开始时协商；监听端配置 TLS 后要求所有会话先走 TLS。网关入向的 **HTTP 后端**只支持 `http://`（同机/内网部署，或前置 TLS 终结）。
 - 请求体在网关和客户端侧**整包发送**（默认上限 64 MiB）；响应体支持流式（ANS）。
 - 不桥接 HTTP **trailers**，因此 gRPC 不能经网关透传（gRPC 依赖 trailers）；WebSocket 未桥接。
-- 标记 ⚪ 的绑定/SDK 是按各语言官方 API 编写的，但本机没有对应工具链，**未编译验证**。
+- 未测：macOS（`libbeep.dylib` 路径已写但没有 Mac 可跑）、Delphi（Pascal 绑定只用 Free Pascal 测过）、Flutter（Dart 绑定只在 Dart VM 上测过）。
 - Git Bash 用户注意：`beepgw call ... GET /path` 中的 `/path` 会被 MSYS 改写成 Windows 路径，请设 `MSYS_NO_PATHCONV=1`。

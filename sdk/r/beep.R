@@ -1,5 +1,5 @@
 # beep.R — R client for BEEP backends via the beepgw HTTP gateway (package `curl`).
-# NOT verified locally (no R here).
+# Test: test.R.
 #   source("beep.R")
 #   r <- beep_call("POST", "/orders", headers = c("Content-Type" = "application/json"), body = '{"id":7}')
 #   r$status; rawToChar(r$body)

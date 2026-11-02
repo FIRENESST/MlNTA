@@ -1,5 +1,5 @@
 (* beep.ml — OCaml client for BEEP backends via the beepgw HTTP gateway (cohttp-lwt-unix).
-   NOT verified locally (no OCaml here).
+   Test: test.ml (link with -thread).
      Lwt_main.run (Beep.call `POST "/orders" ~headers:["Content-Type", "application/json"] ~body:{|{"id":7}|}) *)
 open Lwt.Syntax
 

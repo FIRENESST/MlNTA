@@ -1,0 +1,10 @@
+name: minta_beep_ffi
+description: Dart / Flutter (dart:ffi) binding to libbeep.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  ffi: ^2.1.0

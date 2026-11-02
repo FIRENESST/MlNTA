@@ -10,40 +10,40 @@
 
 另有 **入向（ingress）**：`beepgw expose` 把任何语言写的现成 HTTP 服务挂到 BEEP 网络上，后端不改一行代码。
 
-图例：✅ 已在本仓库测试中实际编译运行并通过 · ⚪ 已编写，本机缺工具链未验证
+图例：✅ 已在 `tests/run_all.py` 中实际编译运行并通过；**W** = Windows 11，**L** = Ubuntu 24.04（WSL2）。
 
 ## A. 原生实现
 
 | 语言 | 位置 | 客户端 | 服务端 | TLS | 框架适配 | 状态 |
 |---|---|---|---|---|---|---|
-| Rust | `core/beep` | ✓ 连接池 | ✓ | ✓ rustls | — | ✅ |
-| Python 3.8+ | `native/python` | ✓ asyncio + 同步 | ✓ | ✓（3.11+） | ASGI（FastAPI/Starlette/Django ASGI）、WSGI（Flask/Django） | ✅ |
-| Node.js 18+ / TypeScript | `native/node` | ✓ | ✓ | ✓ | `(req,res)` 监听器：Express / Koa / Connect / 原生 http | ✅ |
-| Java 11+ | `native/java` | ✓ | ✓ | ✓ PEM | — | ✅ |
-| C# (.NET 8+) | `native/dotnet` | ✓ async | ✓ | ✓ SslStream | — | ✅ |
-| F# / VB.NET | 复用 .NET 库 | ✓ | ✓ | ✓ | — | ✅（`examples/fsharp`、`examples/vbnet`） |
-| PowerShell | 复用 .NET 库 | ✓ | — | ✓ | — | 通过 `Add-Type` 使用；网关 SDK ✅ |
-| Go 1.21+ | `native/go` | ✓ | ✓ | ✓ crypto/tls | `http.Handler`（Gin/Echo/Chi/mux）、`http.RoundTripper`（任何用 `http.Client` 的代码） | ✅（含 `-race`） |
-| Kotlin / Scala / Groovy / Clojure | 复用 Java 库 | ✓ | ✓ | ✓ | — | ⚪（`examples/jvm`） |
+| Rust | `core/beep` | ✓ 连接池 | ✓ | ✓ rustls | — | ✅ W L |
+| Python 3.8+ | `native/python` | ✓ asyncio + 同步 | ✓ | ✓（3.11+） | ASGI（FastAPI/Starlette/Django ASGI）、WSGI（Flask/Django） | ✅ W L |
+| Node.js 18+ / TypeScript | `native/node` | ✓ | ✓ | ✓ | `(req,res)` 监听器：Express / Koa / Connect / 原生 http | ✅ W L |
+| Java 11+ | `native/java` | ✓ | ✓ | ✓ PEM | — | ✅ W L |
+| C# (.NET 8+) | `native/dotnet` | ✓ async | ✓ | ✓ SslStream | — | ✅ W L |
+| F# / VB.NET | 复用 .NET 库 | ✓ | ✓ | ✓ | — | ✅ W L（`examples/fsharp`、`examples/vbnet`） |
+| PowerShell | 复用 .NET 库 | ✓ | — | ✓ | — | 通过 `Add-Type` 使用；网关 SDK ✅ W L |
+| Go 1.21+ | `native/go` | ✓ | ✓ | ✓ crypto/tls | `http.Handler`（Gin/Echo/Chi/mux）、`http.RoundTripper`（任何用 `http.Client` 的代码） | ✅ W L（W 含 `-race`） |
+| Kotlin / Scala 3 / Groovy / Clojure | 复用 Java 库（`examples/jvm`） | ✓ | ✓ | ✓ | — | ✅ L（Kotlin 2.4、Scala 3.3、Groovy 6、Clojure 1.11） |
 
 ## B. C ABI（`core/ffi/include/beep.h`）
 
 | 语言 | 位置 | 客户端 | 服务端回调 | 状态 |
 |---|---|---|---|---|
-| C | `bindings/c` | ✓ | ✓ | ✅ |
-| C++17 | `bindings/cpp/beep.hpp`（header-only RAII） | ✓ | ✓ `std::function` | ✅ |
-| Fortran 2003 | `bindings/fortran` | ✓ | — | ✅ |
-| Ruby | `bindings/ruby`（Fiddle，标准库） | ✓ | —（服务端用 expose） | ✅ |
-| PHP 7.4+ | `bindings/php`（ext-ffi） | ✓ | — | ✅ |
-| Zig | `bindings/zig` | ✓ | — | ✅（Zig 0.17） |
-| LuaJIT | `bindings/luajit` | ✓ | — | ⚪ |
-| Swift | `bindings/swift` | ✓ | — | ⚪ |
-| Nim | `bindings/nim` | ✓ | — | ⚪ |
-| Dart / Flutter | `bindings/dart` | ✓ | — | ⚪ |
-| Julia | `bindings/julia` | ✓ | — | ⚪ |
-| Free Pascal / Delphi | `bindings/pascal` | ✓ | — | ⚪ |
-| D | `bindings/d` | ✓ | — | ⚪ |
-| COBOL（GnuCOBOL） | `bindings/cobol` | ✓ | — | ⚪ |
+| C | `bindings/c` | ✓ | ✓ | ✅ W L |
+| C++17 | `bindings/cpp/beep.hpp`（header-only RAII） | ✓ | ✓ `std::function` | ✅ W L |
+| Fortran 2003 | `bindings/fortran` | ✓ | — | ✅ W L |
+| Ruby | `bindings/ruby`（Fiddle，标准库） | ✓ | —（服务端用 expose） | ✅ W L |
+| PHP 7.4+ | `bindings/php`（ext-ffi） | ✓ | — | ✅ W L |
+| Zig | `bindings/zig` | ✓ | — | ✅ W L（Zig 0.17） |
+| LuaJIT | `bindings/luajit` | ✓ | — | ✅ L（2.1） |
+| Swift | `bindings/swift`（SwiftPM，含 `beep-test`） | ✓ | — | ✅ L（6.4） |
+| Nim | `bindings/nim` | ✓ | — | ✅ L（1.6） |
+| Dart / Flutter | `bindings/dart`（需 `package:ffi`） | ✓ | — | ✅ L（Dart 3.13；Flutter 未测） |
+| Julia | `bindings/julia` | ✓ | — | ✅ L（1.13） |
+| Free Pascal / Delphi | `bindings/pascal` | ✓ | — | ✅ L（FPC 3.2；Delphi 未测） |
+| D | `bindings/d` | ✓ | — | ✅ L（LDC 1.36） |
+| COBOL（GnuCOBOL） | `bindings/cobol` | ✓ | — | ✅ L（GnuCOBOL 3.1） |
 | Objective-C、Ada、Haskell、OCaml、V、Odin… | 直接用 `beep.h` 走各自 C FFI | ✓ | ✓ | — |
 
 ## C. 网关（`beepgw proxy` / `beepgw run`）
@@ -52,20 +52,20 @@
 
 | 语言 | 位置 | 状态 |
 |---|---|---|
-| Shell（curl） | `sdk/shell` | ✅ |
-| PowerShell | `sdk/powershell` | ✅ |
-| Perl | `sdk/perl`（HTTP::Tiny，核心模块） | ✅ |
-| Tcl | `sdk/tcl` | ✅ |
-| PHP（无 FFI 环境） | `sdk/php` | ✅ |
-| Ruby（无 FFI 环境） | `sdk/ruby` | ✅ |
-| TCP JSON-Lines | 协议见 `docs/PROTOCOL.md §3.2` | ✅ |
-| R | `sdk/r` | ⚪ |
-| Elixir | `sdk/elixir`（OTP `:httpc`） | ⚪ |
-| Erlang | `sdk/erlang` | ⚪ |
-| Haskell | `sdk/haskell` | ⚪ |
-| Crystal | `sdk/crystal` | ⚪ |
-| Lua 5.x | `sdk/lua`（LuaSocket） | ⚪ |
-| OCaml | `sdk/ocaml` | ⚪ |
+| Shell（curl） | `sdk/shell` | ✅ W L |
+| PowerShell | `sdk/powershell` | ✅ W L |
+| Perl | `sdk/perl`（HTTP::Tiny，核心模块） | ✅ W L |
+| Tcl | `sdk/tcl` | ✅ W L |
+| PHP（无 FFI 环境） | `sdk/php` | ✅ W L |
+| Ruby（无 FFI 环境） | `sdk/ruby` | ✅ W L |
+| TCP JSON-Lines | 协议见 `docs/PROTOCOL.md §3.2` | ✅ W L |
+| R | `sdk/r`（`curl` 包） | ✅ L（R 4.3） |
+| Elixir | `sdk/elixir`（OTP `:httpc`） | ✅ L（1.14） |
+| Erlang | `sdk/erlang`（`inets`） | ✅ L（OTP 25） |
+| Haskell | `sdk/haskell`（http-client） | ✅ L（GHC 9.4） |
+| Crystal | `sdk/crystal`（标准库） | ✅ L（1.22） |
+| Lua 5.x | `sdk/lua`（LuaSocket） | ✅ L（5.4） |
+| OCaml | `sdk/ocaml`（cohttp-lwt-unix，链接需 `-thread`） | ✅ L（4.14） |
 | 其它（Kotlin/Swift/Dart 的 HTTP 客户端、ABAP、MATLAB、LabVIEW、Excel VBA……） | 直接发 HTTP 到网关 | — |
 
 ## 入向：现有后端零改动挂到 BEEP
@@ -82,7 +82,7 @@ Phoenix、Ktor、Vapor……
 
 Python、Node、Go 还可以**进程内**直接服务 BEEP（无需网关），见上表“框架适配”列。
 
-## 跨语言互通矩阵（`tests/run_all.py` 实测）
+## 跨语言互通矩阵（`tests/run_all.py` 实测，Windows 与 Linux 均通过）
 
 客户端 × 服务端全部通过（echo、ANS 流、2 MB 消息、ERR 码）：
 

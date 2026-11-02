@@ -1,4 +1,4 @@
-## beep.nim — Nim binding to libbeep. NOT verified locally (no Nim toolchain here).
+## beep.nim — Nim binding to libbeep. Test: test_beep.nim.
 ##   let c = newBeepClient("127.0.0.1:10288")
 ##   let r = c.call("POST", "/echo", "Content-Type: text/plain", "hi")
 const libName = when defined(windows): "beep.dll" elif defined(macosx): "libbeep.dylib" else: "libbeep.so"

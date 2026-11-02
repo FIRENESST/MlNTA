@@ -1,5 +1,5 @@
 -- beep.lua — Lua 5.1–5.4 client for BEEP backends via the beepgw HTTP gateway (LuaSocket).
--- NOT verified locally (no Lua here). For LuaJIT native BEEP see bindings/luajit.
+-- Test: test.lua. For LuaJIT native BEEP see bindings/luajit.
 --   local beep = require "beep"
 --   local status, body, headers = beep.call("POST", "/orders", {["Content-Type"]="application/json"}, '{"id":7}')
 local http = require "socket.http"

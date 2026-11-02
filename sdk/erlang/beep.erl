@@ -1,5 +1,5 @@
 %% beep.erl — Erlang/OTP client for BEEP backends via the beepgw HTTP gateway (inets/httpc).
-%% NOT verified locally (no Erlang here).
+%% Test: beep_test.erl.
 %%   {ok, #{status := 200, body := B}} = beep:call(post, "/orders", [{"content-type", "application/json"}], <<"{\"id\":7}">>).
 -module(beep).
 -export([call/2, call/4, gateway/0]).

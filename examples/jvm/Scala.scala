@@ -1,4 +1,4 @@
-// Scala over native BEEP using the pure-Java library (native/java). NOT verified locally (no scalac here).
+// Scala over native BEEP using the pure-Java library (native/java). Run by tests/run_all.py.
 //   scala-cli run Scala.scala --jar minta-beep.jar
 import io.minta.beep.{Headers, Rpc, RpcClient, RpcServer}
 

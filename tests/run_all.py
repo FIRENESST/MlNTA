@@ -5,7 +5,9 @@
     python tests/run_all.py                  # test with existing builds
 
 Toolchains are found on PATH; override with env vars: CARGO, GO, PHP, RUBY, ZIG, JAVA, JAVAC,
-DOTNET, NODE, GCC, GXX, GFORTRAN, PERL, TCLSH, PWSH, CURL, OPENSSL. Missing tools → SKIP.
+DOTNET, NODE, GCC, GXX, GFORTRAN, PERL, TCLSH, PWSH, CURL, OPENSSL, LUAJIT, NIM, LDC2, FPC, JULIA,
+DART, SWIFT, COBC, RSCRIPT, ELIXIR, ERLC, ERL, RUNGHC, CRYSTAL, LUA, OCAMLFIND, KOTLINC, SCALAC,
+GROOVY, CLOJURE. Missing tools → SKIP.
 """
 import argparse
 import os
@@ -139,6 +141,12 @@ def main():
     t["gxx"] = tool("gxx", "g++")
     t["gfortran"] = tool("gfortran")
     t["sh"] = tool("sh", "bash")
+    for k in ("luajit", "nim", "fpc", "julia", "dart", "swift", "cobc", "elixir", "erlc", "erl", "runghc", "crystal",
+              "ocamlfind", "kotlinc", "scalac", "groovy", "clojure"):
+        t[k] = tool(k)
+    t["ldc2"] = tool("ldc2", "ldmd2")
+    t["rscript"] = tool("rscript", "Rscript")
+    t["lua"] = tool("lua", "lua5.4", "lua5.3", "lua5.1")
     py = sys.executable
     if args.build:
         build(t)
@@ -240,6 +248,44 @@ def main():
         else:
             skip("ffi", "Zig", "zig not found")
 
+        out_dir = BUILD / "ffi"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        implib = [str(RELEASE / "beep.dll.lib")] if WIN else [f"-L{RELEASE}", "-lbeep"]
+
+        def case(group, name, key, steps, cmd, cwd=None, marker="all tests passed", timeout=900):
+            """Build with `steps` (each a command), then run `cmd`; skipped when tool `key` is missing."""
+            if not t[key]:
+                skip(group, name, f"{key} not found")
+                return
+            env = {**libpath, "BEEP_ECHO": echo, "BEEP_GATEWAY": gateway}
+            for step in steps:
+                rc, out = run(step, cwd=cwd, env=env, timeout=timeout)
+                if rc != 0:
+                    record(group, name, rc, out)
+                    return
+            rc, out = run(cmd, cwd=cwd, env=env, timeout=timeout)
+            record(group, name, rc, out, marker)
+
+        b = ROOT / "bindings"
+        case("ffi", "LuaJIT", "luajit", [], [t["luajit"], str(b / "luajit/test_beep.lua"), echo])
+        case("ffi", "Nim", "nim", [[t["nim"], "c", "--hints:off", f"--nimcache:{out_dir / 'nimcache'}",
+                                    f"-o:{out_dir / ('test_nim' + EXE)}", "test_beep.nim"]],
+             [str(out_dir / f"test_nim{EXE}"), echo], cwd=b / "nim")
+        case("ffi", "D (LDC)", "ldc2", [[t["ldc2"], "test_beep.d", "beep.d", f"-of={out_dir / ('test_d' + EXE)}",
+                                         f"-od={out_dir / 'd_obj'}", *(implib if WIN else [f"-L-L{RELEASE}", "-L-lbeep"])]],
+             [str(out_dir / f"test_d{EXE}"), echo], cwd=b / "d")
+        (out_dir / "fpc").mkdir(exist_ok=True)
+        case("ffi", "Free Pascal", "fpc", [[t["fpc"], "-Fu.", f"-FU{out_dir / 'fpc'}", f"-o{out_dir / ('test_pascal' + EXE)}",
+                                            *([] if WIN else [f"-Fl{RELEASE}"]), "test_beep.pas"]],
+             [str(out_dir / f"test_pascal{EXE}"), echo], cwd=b / "pascal")
+        case("ffi", "Julia", "julia", [], [t["julia"], "--startup-file=no", str(b / "julia/test_beep.jl"), echo])
+        case("ffi", "Dart", "dart", [[t["dart"], "pub", "get"]], [t["dart"], "run", "test_beep.dart", echo], cwd=b / "dart")
+        case("ffi", "Swift", "swift", [[t["swift"], "build", "--package-path", str(b / "swift"), "--scratch-path", str(out_dir / "swift"),
+                                        "-Xlinker", f"-L{RELEASE}"]],
+             [str(out_dir / "swift/debug" / f"beep-test{EXE}"), echo])
+        case("ffi", "COBOL (GnuCOBOL)", "cobc", [[t["cobc"], "-x", "-o", str(out_dir / f"test_cobol{EXE}"), "beep-demo.cob", *implib]],
+             [str(out_dir / f"test_cobol{EXE}")], cwd=b / "cobol")
+
         # ---- gateway (HTTP / JSON-lines) SDKs ------------------------------------------------
         genv = {"BEEP_GATEWAY": gateway, "MSYS_NO_PATHCONV": "1"}
         sdk = [
@@ -257,6 +303,41 @@ def main():
             # MSYS perl cannot use Windows-style paths in @INC, so run it from its own directory.
             rc, out = run(cmd, env=genv, cwd=ROOT / "sdk/perl" if name == "Perl" else None)
             record("gateway", name, rc, out, "all tests passed")
+        s = ROOT / "sdk"
+        case("gateway", "R (curl)", "rscript", [], [t["rscript"], str(s / "r/test.R")])
+        case("gateway", "Elixir (:httpc)", "elixir", [], [t["elixir"], str(s / "elixir/test.exs")])
+        (out_dir / "erlang").mkdir(exist_ok=True)
+        if t["erl"]:
+            case("gateway", "Erlang (httpc)", "erlc", [[t["erlc"], "-o", str(out_dir / "erlang"), "beep.erl", "beep_test.erl"]],
+                 [t["erl"], "-noshell", "-pa", str(out_dir / "erlang"), "-s", "beep_test", "run"], cwd=s / "erlang")
+        else:
+            skip("gateway", "Erlang (httpc)", "erl not found")
+        case("gateway", "Haskell (http-client)", "runghc", [], [t["runghc"], "Test.hs"], cwd=s / "haskell")
+        case("gateway", "Crystal", "crystal", [], [t["crystal"], "run", "test.cr"], cwd=s / "crystal")
+        case("gateway", "Lua (LuaSocket)", "lua", [], [t["lua"], str(s / "lua/test.lua")])
+        ml = out_dir / "ocaml"
+        ml.mkdir(exist_ok=True)
+        for f in ("beep.ml", "test.ml"):
+            shutil.copy(s / "ocaml" / f, ml / f)
+        case("gateway", "OCaml (cohttp)", "ocamlfind",
+             [[t["ocamlfind"], "ocamlopt", "-thread", "-package", "cohttp-lwt-unix", "-linkpkg", "beep.ml", "test.ml", "-o", f"test_ocaml{EXE}"]],
+             [str(ml / f"test_ocaml{EXE}")], cwd=ml)
+
+        # ---- other JVM languages on the pure-Java library --------------------------------------
+        jcp = str(BUILD / "java")
+        jvm = BUILD / "jvm"
+        (jvm / "scala").mkdir(parents=True, exist_ok=True)
+        ex = ROOT / "examples/jvm"
+        if t["java"] and (BUILD / "java").exists():
+            case("jvm", "Kotlin", "kotlinc", [[t["kotlinc"], "-cp", jcp, str(ex / "Kotlin.kt"), "-include-runtime", "-d", str(jvm / "kotlin.jar")]],
+                 [t["java"], "-cp", f"{jvm / 'kotlin.jar'}{os.pathsep}{jcp}", "KotlinKt"], marker="200 kotlin saw POST /echo")
+            scala_lib = Path(t["scalac"]).resolve().parent.parent / "lib" / "*" if t["scalac"] else ""
+            case("jvm", "Scala 3", "scalac", [[t["scalac"], "-classpath", jcp, "-d", str(jvm / "scala"), str(ex / "Scala.scala")]],
+                 [t["java"], "-cp", os.pathsep.join([str(scala_lib), str(jvm / "scala"), jcp]), "BeepScala"], marker="200 scala saw GET /scala")
+            case("jvm", "Groovy", "groovy", [], [t["groovy"], "-cp", jcp, str(ex / "groovy.groovy")], marker="200 groovy saw GET /groovy")
+            case("jvm", "Clojure", "clojure", [], [t["clojure"], "-cp", jcp, str(ex / "clojure.clj")], marker="200 clojure saw GET /clj")
+        else:
+            skip("jvm", "Kotlin/Scala/Groovy/Clojure", "java not found or Java library not built")
         # JSON-lines
         with socket.create_connection(("127.0.0.1", p_jsonl), timeout=10) as s:
             s.sendall(b'{"id":1,"method":"POST","target":"/echo","body":"jsonl"}\n{"id":2,"target":"/err/550"}\n')

@@ -1,4 +1,4 @@
-/// beep.d — D binding to libbeep. NOT verified locally (no D compiler here).
+/// beep.d — D binding to libbeep. Test: test_beep.d.
 ///   auto c = BeepClient("127.0.0.1:10288");
 ///   auto r = c.call("POST", "/echo", "Content-Type: text/plain", cast(const(ubyte)[]) "hi");
 module beep;

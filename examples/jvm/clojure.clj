@@ -1,4 +1,4 @@
-;; Clojure over native BEEP using the pure-Java library (native/java). NOT verified locally.
+;; Clojure over native BEEP using the pure-Java library (native/java). Run by tests/run_all.py.
 ;;   clojure -Sdeps '{:deps {io.minta/minta-beep {:local/root "../../native/java/target/minta-beep-0.1.0.jar"}}}' -M clojure.clj
 (import '[io.minta.beep RpcClient RpcServer Rpc$Reply Rpc$Handler Headers])
 

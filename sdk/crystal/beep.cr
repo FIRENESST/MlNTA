@@ -1,5 +1,5 @@
 # beep.cr — Crystal client for BEEP backends via the beepgw HTTP gateway (stdlib HTTP::Client).
-# NOT verified locally (no Crystal here).
+# Test: test.cr.
 #   r = Beep.call("POST", "/orders", HTTP::Headers{"Content-Type" => "application/json"}, %({"id":7}))
 require "http/client"
 require "json"

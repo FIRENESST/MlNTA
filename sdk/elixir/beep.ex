@@ -1,7 +1,7 @@
 defmodule Beep do
   @moduledoc """
   Elixir client for BEEP backends via the beepgw HTTP gateway, using OTP's built-in `:httpc`
-  (no dependencies). NOT verified locally (no Elixir here).
+  (no dependencies). Test: test.exs.
 
       {:ok, %{status: 200, body: body}} = Beep.call(:post, "/orders", [{"content-type", "application/json"}], ~s({"id":7}))
 

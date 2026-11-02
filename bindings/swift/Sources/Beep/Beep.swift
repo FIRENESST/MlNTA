@@ -1,4 +1,4 @@
-// Swift wrapper over libbeep. NOT verified locally.
+// Swift wrapper over libbeep. Test: Sources/beep-test.
 //   let c = try BeepClient("127.0.0.1:10288")
 //   let r = try c.call("POST", "/echo", headers: ["Content-Type": "text/plain"], body: Data("hi".utf8))
 import CBeep

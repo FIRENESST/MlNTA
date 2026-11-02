@@ -1,4 +1,4 @@
-// beep.dart — Dart / Flutter (dart:ffi) binding to libbeep. NOT verified locally (no Dart SDK here).
+// beep.dart — Dart / Flutter (dart:ffi) binding to libbeep. Test: test_beep.dart.
 // Requires package:ffi.
 //   final c = BeepClient('127.0.0.1:10288');
 //   final r = c.call('POST', '/echo', headers: {'Content-Type': 'text/plain'}, body: utf8.encode('hi'));

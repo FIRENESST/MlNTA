@@ -1,4 +1,4 @@
-{ beep.pas - Free Pascal / Delphi binding to libbeep. NOT verified locally (no FPC/Delphi here).
+{ beep.pas - Free Pascal / Delphi binding to libbeep. Tested with Free Pascal (test_beep.pas); Delphi untested.
     uses beep;
     var c: PBeepClient; status: Integer; body: AnsiString;
     c := beep_client_new('127.0.0.1:10288', 1, 16, 30000);

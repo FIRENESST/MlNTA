@@ -1,4 +1,4 @@
--- beep.lua — LuaJIT FFI binding to libbeep (native BEEP). NOT verified locally (no LuaJIT here).
+-- beep.lua — LuaJIT FFI binding to libbeep (native BEEP). Test: test_beep.lua.
 --   local beep = require "beep"
 --   local c = beep.client("127.0.0.1:10288")
 --   local status, body, headers = c:call("POST", "/echo", {["Content-Type"]="text/plain"}, "hi")

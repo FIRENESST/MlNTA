@@ -1,4 +1,4 @@
-// Kotlin over native BEEP using the pure-Java library (native/java). NOT verified locally (no kotlinc here).
+// Kotlin over native BEEP using the pure-Java library (native/java). Run by tests/run_all.py.
 //   kotlinc -cp minta-beep.jar Kotlin.kt -include-runtime -d demo.jar && java -cp demo.jar:minta-beep.jar KotlinKt
 import io.minta.beep.Headers
 import io.minta.beep.Rpc

@@ -1,4 +1,4 @@
-// Groovy over native BEEP using the pure-Java library (native/java). NOT verified locally.
+// Groovy over native BEEP using the pure-Java library (native/java). Run by tests/run_all.py.
 //   groovy -cp minta-beep.jar groovy.groovy
 import io.minta.beep.*
 

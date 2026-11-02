@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- | Haskell client for BEEP backends via the beepgw HTTP gateway (http-client, http-types).
--- NOT verified locally (no GHC here).
+-- Test: Test.hs.
 --
 -- > mgr <- newManager defaultManagerSettings
 -- > r <- beepCall mgr "POST" "/orders" [("Content-Type", "application/json")] "{\"id\":7}"
