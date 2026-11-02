@@ -1,0 +1,17 @@
+[package]
+name = "minta-beep-ffi"
+description = "C ABI for the MINTA BEEP bridge (libbeep): native BEEP from any language with an FFI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "beep"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+minta-beep = { path = "../beep" }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time"] }
+bytes.workspace = true
+async-trait.workspace = true

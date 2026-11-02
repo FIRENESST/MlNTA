@@ -1,0 +1,12 @@
+{
+  "name": "@minta/beep",
+  "version": "0.1.0",
+  "description": "Pure Node.js RFC 3080/3081 BEEP with the MINTA RPC profile (urn:minta:beep:rpc:1). Zero dependencies.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "lib/"],
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node test/test.js 127.0.0.1:10288" },
+  "keywords": ["beep", "rfc3080", "rfc3081", "rpc", "bridge"],
+  "license": "MIT OR Apache-2.0"
+}

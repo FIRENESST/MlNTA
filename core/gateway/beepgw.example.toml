@@ -1,0 +1,43 @@
+# beepgw example configuration:  beepgw run -c beepgw.example.toml
+# Every section is optional and repeatable; at least one listener is required.
+
+# ---- BEEP peers we connect to (egress targets) ----------------------------------------
+[[upstream]]
+name = "default"
+address = "127.0.0.1:10288"      # a BEEP peer serving urn:minta:beep:rpc:1
+sessions = 2                     # TCP connections in the pool
+max_channels = 64                # channels per connection (= concurrent requests per connection)
+connect_timeout_ms = 5000
+request_timeout_ms = 30000       # deadline for the response head; also sent as Rpc-Timeout
+
+[[upstream]]
+name = "billing"
+address = "10.0.0.7:10288"
+# tls = { server_name = "billing.internal", ca_file = "/etc/beep/ca.pem" }   # BEEP TLS tuning profile
+
+# ---- Egress: plain HTTP (HTTP/1.1 + h2c) from apps in any language -----------------------
+[[http]]
+listen = "127.0.0.1:8080"
+upstream = "default"
+max_body_bytes = 67108864
+forwarded_headers = true
+routes = [
+  { prefix = "/billing/", upstream = "billing", strip_prefix = true },
+]
+
+# ---- Egress: newline-delimited JSON over TCP (COBOL, embedded C, shell + nc, ...) --------
+[[jsonl]]
+listen = "127.0.0.1:8081"
+upstream = "default"
+
+# ---- Ingress: expose an existing HTTP service (Express, Spring, Django, Rails, ...) on BEEP
+[[beep]]
+listen = "0.0.0.0:10289"
+backend = "http://127.0.0.1:3000"
+rpy_max_bytes = 8388608          # larger / chunked / streaming responses go out as ANS
+backend_timeout_ms = 30000
+# tls = { cert_file = "/etc/beep/cert.pem", key_file = "/etc/beep/key.pem" }
+
+# ---- Built-in test server (/echo, /inspect, /stream/N, /status/N, /err/N, /sleep/MS, /bytes/N)
+[[echo]]
+listen = "127.0.0.1:10288"

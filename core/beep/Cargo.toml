@@ -1,0 +1,28 @@
+[package]
+name = "minta-beep"
+description = "RFC 3080/3081 BEEP implementation with the MINTA RPC profile (urn:minta:beep:rpc:1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "minta_beep"
+
+[features]
+default = ["tls"]
+tls = ["dep:tokio-rustls", "dep:rustls-pemfile", "dep:webpki-roots"]
+
+[dependencies]
+tokio.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio-rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }

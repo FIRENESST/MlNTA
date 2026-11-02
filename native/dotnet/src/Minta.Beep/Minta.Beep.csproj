@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Minta.Beep</RootNamespace>
+    <PackageId>Minta.Beep</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Pure .NET RFC 3080/3081 BEEP with the MINTA RPC profile (urn:minta:beep:rpc:1). Works from C#, F#, VB.NET and PowerShell.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+</Project>

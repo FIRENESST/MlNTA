@@ -1,0 +1,15 @@
+core/target/
+tests/.build/
+native/node/node_modules/
+native/java/target/
+native/dotnet/**/bin/
+native/dotnet/**/obj/
+examples/**/bin/
+examples/**/obj/
+__pycache__/
+*.pyc
+*.o
+*.mod
+*.exe
+.zig-cache/
+zig-out/

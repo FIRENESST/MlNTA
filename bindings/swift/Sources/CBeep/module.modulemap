@@ -1,0 +1,5 @@
+module CBeep [system] {
+    header "../../../../core/ffi/include/beep.h"
+    link "beep"
+    export *
+}
