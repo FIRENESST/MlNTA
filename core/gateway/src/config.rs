@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -36,6 +37,46 @@ pub struct Upstream {
     pub request_timeout_ms: u64,
     #[serde(default)]
     pub tls: Option<ClientTls>,
+    /// Authenticate to the upstream with SASL PLAIN.
+    #[serde(default)]
+    pub sasl: Option<SaslClient>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaslClient {
+    pub user: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Read the password from this environment variable instead.
+    #[serde(default)]
+    pub password_env: Option<String>,
+    /// Identity to act as (empty = `user`).
+    #[serde(default)]
+    pub authzid: String,
+}
+
+impl SaslClient {
+    pub fn credentials(&self) -> Result<minta_beep::sasl::PlainCredentials, String> {
+        let password = match (&self.password, &self.password_env) {
+            (Some(p), _) => p.clone(),
+            (None, Some(var)) => std::env::var(var).map_err(|_| format!("SASL password variable {var} is not set"))?,
+            (None, None) => return Err(format!("SASL user {:?} needs password or password_env", self.user)),
+        };
+        Ok(minta_beep::sasl::PlainCredentials { authzid: self.authzid.clone(), authcid: self.user.clone(), password })
+    }
+}
+
+/// SASL PLAIN users a BEEP listener accepts; when present, authentication is required.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ServerAuth {
+    /// One `user:password` or `user:sha256:<hex>` per line (`#` comments).
+    #[serde(default)]
+    pub users_file: Option<PathBuf>,
+    /// Inline users, same value syntax.
+    #[serde(default)]
+    pub users: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,14 +130,21 @@ pub struct JsonlListener {
 #[serde(deny_unknown_fields)]
 pub struct BeepListener {
     pub listen: String,
-    /// Base URL of the HTTP backend, e.g. `http://127.0.0.1:3000` or `http://10.0.0.5/api`.
+    /// Base URL of the HTTP backend: `http://127.0.0.1:3000`, `http://10.0.0.5/api`,
+    /// `h2c://127.0.0.1:50051` (HTTP/2 cleartext, e.g. gRPC) or `https://api.internal`.
     pub backend: String,
+    /// PEM CA bundle trusted for an `https://` backend (default: Mozilla roots).
+    #[serde(default)]
+    pub backend_ca_file: Option<PathBuf>,
     #[serde(default = "d_rpy_max")]
     pub rpy_max_bytes: usize,
     #[serde(default = "d_request_ms")]
     pub backend_timeout_ms: u64,
     #[serde(default)]
     pub tls: Option<ServerTls>,
+    /// Require SASL PLAIN; the identity reaches the backend as `X-Beep-User`.
+    #[serde(default)]
+    pub auth: Option<ServerAuth>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +153,8 @@ pub struct EchoListener {
     pub listen: String,
     #[serde(default)]
     pub tls: Option<ServerTls>,
+    #[serde(default)]
+    pub auth: Option<ServerAuth>,
 }
 
 fn d_sessions() -> usize {

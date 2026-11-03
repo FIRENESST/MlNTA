@@ -55,7 +55,7 @@ namespace Minta.Beep
         }
     }
 
-    /// <summary>Session tuning (docs/PROTOCOL.md §1.6).</summary>
+    /// <summary>Session tuning (docs/PROTOCOL.md §1.8).</summary>
     public sealed class BeepConfig
     {
         public int RecvWindow { get; set; } = 262_144;

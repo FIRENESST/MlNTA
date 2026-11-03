@@ -4,7 +4,7 @@
 # ---- BEEP peers we connect to (egress targets) ----------------------------------------
 [[upstream]]
 name = "default"
-address = "127.0.0.1:10288"      # a BEEP peer serving urn:minta:beep:rpc:1
+address = "127.0.0.1:10288"      # a BEEP peer serving urn:minta:beep:rpc:2 (or rpc:1)
 sessions = 2                     # TCP connections in the pool
 max_channels = 64                # channels per connection (= concurrent requests per connection)
 connect_timeout_ms = 5000
@@ -14,12 +14,13 @@ request_timeout_ms = 30000       # deadline for the response head; also sent as 
 name = "billing"
 address = "10.0.0.7:10288"
 # tls = { server_name = "billing.internal", ca_file = "/etc/beep/ca.pem" }   # BEEP TLS tuning profile
+# sasl = { user = "gateway", password_env = "BILLING_PASSWORD" }             # SASL PLAIN (use with tls)
 
-# ---- Egress: plain HTTP (HTTP/1.1 + h2c) from apps in any language -----------------------
+# ---- Egress: plain HTTP (HTTP/1.1 + h2c, incl. gRPC and WebSocket) from apps in any language
 [[http]]
 listen = "127.0.0.1:8080"
 upstream = "default"
-max_body_bytes = 67108864
+max_body_bytes = 67108864        # cap for bodies buffered for an rpc:1 upstream (rpc:2 streams)
 forwarded_headers = true
 routes = [
   { prefix = "/billing/", upstream = "billing", strip_prefix = true },
@@ -33,11 +34,20 @@ upstream = "default"
 # ---- Ingress: expose an existing HTTP service (Express, Spring, Django, Rails, ...) on BEEP
 [[beep]]
 listen = "0.0.0.0:10289"
-backend = "http://127.0.0.1:3000"
+backend = "http://127.0.0.1:3000"    # or h2c://host:port (HTTP/2, e.g. gRPC) / https://host
+# backend_ca_file = "/etc/beep/backend-ca.pem"   # trust for an https:// backend
 rpy_max_bytes = 8388608          # larger / chunked / streaming responses go out as ANS
 backend_timeout_ms = 30000
 # tls = { cert_file = "/etc/beep/cert.pem", key_file = "/etc/beep/key.pem" }
+# Require SASL PLAIN; the identity reaches the backend as X-Beep-User.
+# auth = { users_file = "/etc/beep/users.txt" }  # lines: user:password or user:sha256:<hex>
 
-# ---- Built-in test server (/echo, /inspect, /stream/N, /status/N, /err/N, /sleep/MS, /bytes/N)
+# ---- Ingress for a gRPC service: gRPC clients talk h2c to an [[http]] listener whose upstream is this
+[[beep]]
+listen = "0.0.0.0:10290"
+backend = "h2c://127.0.0.1:50051"
+
+# ---- Built-in test server (/echo, /inspect, /stream/N, /status/N, /err/N, /sleep/MS, /bytes/N, /duplex, /count)
 [[echo]]
 listen = "127.0.0.1:10288"
+# auth = { users = { alice = "sha256:<hex>" } }   # hex = output of: printf %s 'password' | sha256sum

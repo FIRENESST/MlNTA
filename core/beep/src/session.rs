@@ -29,6 +29,9 @@ pub struct Config {
     pub max_message_size: usize,
     pub greeting_timeout: Duration,
     pub close_timeout: Duration,
+    /// Listener side: refuse to start channels other than SASL ones (`ERR 530`) until the
+    /// peer has authenticated (see [`crate::sasl`]).
+    pub require_auth: bool,
 }
 
 impl Default for Config {
@@ -39,6 +42,7 @@ impl Default for Config {
             max_message_size: 64 << 20,
             greeting_timeout: Duration::from_secs(10),
             close_timeout: Duration::from_secs(10),
+            require_auth: false,
         }
     }
 }
@@ -349,6 +353,50 @@ impl Responder {
     }
 }
 
+/// Writes the rest of a MSG started with [`Channel::send_stream`]. Replies may arrive (and
+/// should be read) while the message is still being written.
+pub struct MsgSink {
+    shared: Arc<Shared>,
+    tx: Arc<TxWin>,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    channel: u32,
+    msgno: u32,
+}
+
+impl MsgSink {
+    pub fn msgno(&self) -> u32 {
+        self.msgno
+    }
+
+    /// Send more of the message (frames with `more='*'`).
+    pub async fn send(&mut self, data: Bytes) -> Result<()> {
+        self.shared.write_frames(&self.tx, self.channel, FrameType::Msg, self.msgno, 0, data, false).await
+    }
+
+    /// Send the final piece and complete the message.
+    pub async fn finish(mut self, data: Bytes) -> Result<()> {
+        let r = self.shared.write_frames(&self.tx, self.channel, FrameType::Msg, self.msgno, 0, data, true).await;
+        self.guard = None;
+        r
+    }
+}
+
+impl Drop for MsgSink {
+    fn drop(&mut self) {
+        // Dropped mid-message: end it with an empty final frame so the channel stays usable.
+        // The receiver sees the message as truncated (for rpc:2 bodies, an abort).
+        if let Some(guard) = self.guard.take() {
+            let (shared, tx, channel, msgno) = (self.shared.clone(), self.tx.clone(), self.channel, self.msgno);
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    let _ = shared.write_frames(&tx, channel, FrameType::Msg, msgno, 0, Bytes::new(), true).await;
+                    drop(guard);
+                });
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal state
 
@@ -360,7 +408,8 @@ enum Out {
 struct TxWin {
     st: Mutex<TxState>,
     notify: Notify,
-    lock: tokio::sync::Mutex<()>,
+    /// Held while one message is being sent, so messages never interleave on a channel.
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct TxState {
@@ -375,7 +424,7 @@ impl TxWin {
         Arc::new(TxWin {
             st: Mutex::new(TxState { seq: 0, limit: INITIAL_WINDOW, dead: false }),
             notify: Notify::new(),
-            lock: tokio::sync::Mutex::new(()),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 }
@@ -428,6 +477,8 @@ struct State {
     peer_profiles: Vec<String>,
     closed: Option<Error>,
     releasing: bool,
+    /// Identity the peer authenticated as (SASL).
+    identity: Option<String>,
 }
 
 pub(crate) struct Shared {
@@ -635,19 +686,31 @@ impl Shared {
         Ok(())
     }
 
+    fn tx_for(&self, channel: u32) -> Result<Arc<TxWin>> {
+        let st = self.st.lock().unwrap();
+        if let Some(e) = &st.closed {
+            return Err(e.clone());
+        }
+        st.chans
+            .get(&channel)
+            .map(|c| c.tx.clone())
+            .ok_or_else(|| Error::Closed(format!("channel {channel} is not open")))
+    }
+
     /// Send a complete message, fragmenting it to fit the peer's window and our frame size.
     async fn send_message(&self, channel: u32, ftype: FrameType, msgno: u32, ansno: u32, payload: Bytes) -> Result<()> {
-        let tx = {
-            let st = self.st.lock().unwrap();
-            if let Some(e) = &st.closed {
-                return Err(e.clone());
-            }
-            st.chans
-                .get(&channel)
-                .map(|c| c.tx.clone())
-                .ok_or_else(|| Error::Closed(format!("channel {channel} is not open")))?
-        };
+        let tx = self.tx_for(channel)?;
         let _guard = tx.lock.lock().await;
+        self.write_frames(&tx, channel, ftype, msgno, ansno, payload, true).await
+    }
+
+    /// Send `payload` as frames of one message. With `last == false` every frame carries
+    /// `more='*'` (the message continues); the caller must hold `tx.lock`.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_frames(&self, tx: &TxWin, channel: u32, ftype: FrameType, msgno: u32, ansno: u32, payload: Bytes, last: bool) -> Result<()> {
+        if !last && payload.is_empty() {
+            return Ok(());
+        }
         let max_frame = self.cfg.max_frame_size.max(1) as usize;
         let mut off = 0usize;
         loop {
@@ -662,12 +725,11 @@ impl Shared {
                 let remaining = payload.len() - off;
                 if remaining == 0 || avail > 0 {
                     let n = remaining.min(avail.max(0) as usize).min(max_frame);
-                    let more = off + n < payload.len();
                     let frame = DataFrame {
                         ftype,
                         channel,
                         msgno,
-                        more,
+                        more: off + n < payload.len() || !last,
                         seqno: ts.seq,
                         ansno,
                         payload: payload.slice(off..off + n),
@@ -675,7 +737,7 @@ impl Shared {
                     ts.seq = ts.seq.wrapping_add(n as u32);
                     self.enqueue(encode_data(&frame));
                     off += n;
-                    if !more {
+                    if off >= payload.len() {
                         return Ok(());
                     }
                     continue;
@@ -683,6 +745,38 @@ impl Shared {
             }
             notified.await;
         }
+    }
+
+    /// Reserve a msgno for a MSG that is sent incrementally; `head` goes out at once.
+    async fn send_msg_stream(&self, channel: u32, head: Bytes) -> Result<(MsgSink, ReplyStream)> {
+        let tx = self.tx_for(channel)?;
+        let guard = tx.lock.clone().lock_owned().await;
+        let (sink, rx) = mpsc::unbounded_channel();
+        let msgno = {
+            let mut st = self.st.lock().unwrap();
+            if let Some(e) = &st.closed {
+                return Err(e.clone());
+            }
+            let ch = st.chans.get_mut(&channel).ok_or_else(|| Error::Closed(format!("channel {channel} is not open")))?;
+            let mut n = ch.next_msgno;
+            while ch.outstanding.contains_key(&n) {
+                n = if n >= MAX_CHANNEL { 0 } else { n + 1 };
+            }
+            ch.next_msgno = if n >= MAX_CHANNEL { 0 } else { n + 1 };
+            ch.outstanding.insert(n, Outstanding { sink, ans_open: HashSet::new() });
+            n
+        };
+        let shared = self.me.upgrade().expect("alive");
+        let msg = MsgSink { shared: shared.clone(), tx, guard: Some(guard), channel, msgno };
+        let stream = ReplyStream { rx, done: false, shared };
+        if let Err(e) = self.write_frames(&msg.tx, channel, FrameType::Msg, msgno, 0, head, false).await {
+            let mut msg = msg;
+            msg.guard = None; // nothing to terminate: the session is gone
+            let o = self.st.lock().unwrap().chans.get_mut(&channel).and_then(|c| c.outstanding.remove(&msgno));
+            drop(o);
+            return Err(e);
+        }
+        Ok((msg, stream))
     }
 
     /// Reserve a msgno, register the reply sink, and queue the MSG for transmission.
@@ -769,6 +863,7 @@ impl Session {
                 peer_profiles: vec![],
                 closed: None,
                 releasing: false,
+                identity: None,
             }),
             profiles,
             closed_tx,
@@ -841,6 +936,15 @@ impl Session {
     /// Profiles the peer advertised in its greeting.
     pub fn peer_profiles(&self) -> Vec<String> {
         self.shared.st.lock().unwrap().peer_profiles.clone()
+    }
+
+    /// Identity the peer authenticated as on this session (SASL), if any.
+    pub fn identity(&self) -> Option<String> {
+        self.shared.st.lock().unwrap().identity.clone()
+    }
+
+    pub(crate) fn set_identity(&self, id: String) {
+        self.shared.st.lock().unwrap().identity = Some(id);
     }
 
     pub fn is_closed(&self) -> bool {
@@ -1011,6 +1115,12 @@ impl Channel {
         self.session.shared.send_msg(self.number, payload).await
     }
 
+    /// Start a MSG whose payload is written incrementally: `head` is sent now, the rest
+    /// through the returned [`MsgSink`]. Replies arrive on the [`ReplyStream`] meanwhile.
+    pub async fn send_stream(&self, head: Bytes) -> Result<(MsgSink, ReplyStream)> {
+        self.session.shared.send_msg_stream(self.number, head).await
+    }
+
     /// Send a MSG and collect the whole reply.
     pub async fn request(&self, payload: Bytes) -> Result<Reply> {
         let max = self.session.shared.cfg.max_message_size;
@@ -1162,6 +1272,9 @@ async fn handle_start(session: &Session, number: u32, profiles: Vec<ProfileEl>) 
     let Some((p, handler)) = profiles.iter().find_map(|p| shared.profiles.get(&p.uri).map(|h| (p, h))) else {
         return Err((code::ACTION_NOT_TAKEN, "no acceptable profile".into()));
     };
+    if shared.cfg.require_auth && !p.uri.starts_with(crate::sasl::SASL_PREFIX) && session.identity().is_none() {
+        return Err((code::AUTH_REQUIRED, "authentication required".into()));
+    }
     let init_reply = handler.on_start(session, number, p.data.as_deref()).await?;
     let (qtx, qrx) = mpsc::unbounded_channel();
     {

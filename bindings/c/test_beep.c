@@ -2,7 +2,8 @@
  *
  *   gcc -I ../../core/ffi/include test_beep.c <path-to>/beep.dll -o test_beep     (Windows / MinGW)
  *   cc  -I ../../core/ffi/include test_beep.c -L<dir> -lbeep -o test_beep        (Linux / macOS)
- *   ./test_beep 127.0.0.1:10288
+ *   ./test_beep 127.0.0.1:10288 [AUTH_ADDR]
+ * AUTH_ADDR: an echo server requiring SASL PLAIN with user alice / password s3cret.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,6 +107,26 @@ int main(int argc, char **argv) {
         rc = beep_call(bad, "GET", "/", NULL, NULL, 0, &r);
         CHECK(rc == BEEP_E_CONNECT || rc == BEEP_E_TIMEOUT, "unreachable rc=%d", rc);
         beep_client_free(bad);
+    }
+
+    /* 7. SASL PLAIN against a listener that requires it */
+    if (argc > 2) {
+        beep_client *wrong = beep_client_new_auth(argv[2], 1, 1, 5000, NULL, NULL, "alice", "nope");
+        rc = beep_call(wrong, "GET", "/inspect", NULL, NULL, 0, &r);
+        CHECK(rc == BEEP_E_CONNECT && beep_last_error_code() == 535, "bad password rc=%d code=%d", rc, beep_last_error_code());
+        beep_client_free(wrong);
+        beep_client *anon = beep_client_new(argv[2], 1, 1, 5000);
+        rc = beep_call(anon, "GET", "/inspect", NULL, NULL, 0, &r);
+        CHECK(rc == BEEP_E_CONNECT && beep_last_error_code() == 530, "no credentials rc=%d code=%d", rc, beep_last_error_code());
+        beep_client_free(anon);
+        beep_client *alice = beep_client_new_auth(argv[2], 1, 1, 5000, NULL, NULL, "alice", "s3cret");
+        rc = beep_call(alice, "GET", "/inspect", NULL, NULL, 0, &r);
+        CHECK(rc == BEEP_OK, "sasl call rc=%d %s", rc, beep_last_error());
+        if (rc == BEEP_OK) {
+            CHECK(strstr((const char *)beep_response_body(r, NULL), "\"identity\":\"alice\"") != NULL, "identity: %s", beep_response_body(r, NULL));
+            beep_response_free(r);
+        }
+        beep_client_free(alice);
     }
 
     beep_client_free(c);

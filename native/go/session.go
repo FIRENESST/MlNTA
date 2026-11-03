@@ -19,7 +19,7 @@ const (
 	maxChannel    = 2147483647
 )
 
-// Config tunes a session (docs/PROTOCOL.md §1.6).
+// Config tunes a session (docs/PROTOCOL.md §1.8).
 type Config struct {
 	RecvWindow      int
 	MaxFrameSize    int

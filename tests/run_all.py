@@ -10,6 +10,7 @@ DART, SWIFT, COBC, RSCRIPT, ELIXIR, ERLC, ERL, RUNGHC, CRYSTAL, LUA, OCAMLFIND, 
 GROOVY, CLOJURE. Missing tools → SKIP.
 """
 import argparse
+import hashlib
 import os
 import platform
 import shutil
@@ -156,21 +157,28 @@ def main():
     gw = RELEASE / f"beepgw{EXE}"
     if not gw.exists():
         sys.exit("beepgw not built: run with --build (needs cargo)")
-    certs = BUILD / "certs"
+    certs = BUILD / "tls"
     certs.mkdir(parents=True, exist_ok=True)
     cert, key = certs / "cert.pem", certs / "key.pem"
     if not cert.exists() and t["openssl"]:
+        # A self-signed *end-entity* certificate: rustls/webpki refuses a CA cert as a server cert.
         run([t["openssl"], "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key), "-out", str(cert),
-             "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-days", "30"],
+             "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-addext", "basicConstraints=critical,CA:FALSE",
+             "-addext", "extendedKeyUsage=serverAuth", "-days", "30"],
             env={"MSYS_NO_PATHCONV": "1"})
     have_tls = cert.exists()
 
     procs = []
     try:
-        p_echo, p_tls, p_http, p_jsonl, p_backend, p_ingress, p_http2 = (free_port() for _ in range(7))
+        p_echo, p_tls, p_http, p_jsonl, p_backend, p_ingress, p_http2, p_auth = (free_port() for _ in range(8))
         echo = f"127.0.0.1:{p_echo}"
         tls_echo = f"127.0.0.1:{p_tls}"
+        auth_echo = f"127.0.0.1:{p_auth}"
         procs.append(Proc([str(gw), "echo", "--listen", echo]).wait_port(p_echo))
+        # SASL PLAIN: alice / s3cret, stored hashed.
+        users = BUILD / "users.txt"
+        users.write_text("# test users\nalice:sha256:" + hashlib.sha256(b"s3cret").hexdigest() + "\n")
+        procs.append(Proc([str(gw), "echo", "--listen", auth_echo, "--sasl-users", str(users)]).wait_port(p_auth))
         if have_tls:
             procs.append(Proc([str(gw), "echo", "--listen", tls_echo, "--tls-cert", str(cert), "--tls-key", str(key)]).wait_port(p_tls))
         procs.append(Proc([str(gw), "proxy", "--listen", f"127.0.0.1:{p_http}", "--upstream", echo, "--jsonl", f"127.0.0.1:{p_jsonl}"]).wait_port(p_http))
@@ -222,10 +230,10 @@ def main():
             skip("native", "Go", "go not found")
 
         # ---- C ABI bindings -------------------------------------------------------------------
-        for name, exe in (("C", "test_c"), ("C++", "test_cpp"), ("Fortran", "test_fortran")):
+        for name, exe in (("C (+SASL)", "test_c"), ("C++", "test_cpp"), ("Fortran", "test_fortran")):
             p = BUILD / f"{exe}{EXE}"
             if p.exists():
-                rc, out = run([str(p), echo], env=libpath)
+                rc, out = run([str(p), echo, *([auth_echo] if exe == "test_c" else [])], env=libpath)
                 record("ffi", name, rc, out, "all tests passed")
             else:
                 skip("ffi", name, "not built (needs gcc/g++/gfortran)")
@@ -378,6 +386,53 @@ def main():
             record("ingress", "HTTP→BEEP→HTTP backend (any language)", rc, out, '"path": "/json?q=2"')
             rc, out = run([t["curl"], "-s", f"http://127.0.0.1:{p_http2}/chunked/3"], env={"NO_PROXY": "*"})
             record("ingress", "chunked backend → ANS stream", rc, out, "part 2")
+
+        # ---- rpc:2: streamed uploads, gRPC, WebSocket, HTTPS backends ---------------------------
+        local = {"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
+        rc, out = run([py, str(ROOT / "tests/stream_test.py"), f"127.0.0.1:{p_http}"], env=local, timeout=300)
+        record("rpc:2", "streamed 80 MiB upload (no 64 MiB cap)", rc, out, "all tests passed")
+
+        def chain(backend, extra=()):
+            """beepgw expose → backend, plus a proxy in front; returns the proxy's address."""
+            pb, ph = free_port(), free_port()
+            procs.append(Proc([str(gw), "expose", "--listen", f"127.0.0.1:{pb}", "--backend", backend, *extra]).wait_port(pb))
+            procs.append(Proc([str(gw), "proxy", "--listen", f"127.0.0.1:{ph}", "--upstream", f"127.0.0.1:{pb}"]).wait_port(ph))
+            return f"127.0.0.1:{ph}"
+
+        def has_module(name):
+            return run([py, "-c", f"import {name}"])[0] == 0
+
+        if has_module("grpc"):
+            port = free_port()
+            procs.append(Proc([py, str(ROOT / "tests/grpc_test.py"), "serve", str(port)]).wait_port(port))
+            rc, out = run([py, str(ROOT / "tests/grpc_test.py"), "client", chain(f"h2c://127.0.0.1:{port}")], env=local, timeout=120)
+            record("rpc:2", "gRPC (grpcio client <-> grpcio server) via BEEP", rc, out, "all tests passed")
+        else:
+            skip("rpc:2", "gRPC", "python grpcio not installed")
+        if has_module("websockets"):
+            port = free_port()
+            procs.append(Proc([py, str(ROOT / "tests/ws_test.py"), "serve", str(port)]).wait_port(port))
+            rc, out = run([py, str(ROOT / "tests/ws_test.py"), "client", f"ws://{chain(f'http://127.0.0.1:{port}')}/chat"], env=local, timeout=120)
+            record("rpc:2", "WebSocket (upgrade tunnel) via BEEP", rc, out, "all tests passed")
+        else:
+            skip("rpc:2", "WebSocket", "python websockets not installed")
+        if have_tls and t["curl"]:
+            port = free_port()
+            procs.append(Proc([py, str(ROOT / "tests/backend.py"), str(port), str(cert), str(key)]).wait_port(port))
+            front = chain(f"https://localhost:{port}", ["--backend-ca", str(cert)])
+            rc, out = run([t["curl"], "-s", f"http://{front}/hello"], env={"NO_PROXY": "*"})
+            record("ingress", "HTTPS backend (TLS to the backend)", rc, out, "hello from python backend")
+
+        # ---- SASL PLAIN through the gateway: credentials on the proxy, identity at the server --
+        if t["curl"]:
+            ph, pa = free_port(), free_port()
+            procs.append(Proc([str(gw), "proxy", "--listen", f"127.0.0.1:{ph}", "--upstream", auth_echo,
+                               "--sasl-user", "alice", "--sasl-password", "s3cret"]).wait_port(ph))
+            procs.append(Proc([str(gw), "proxy", "--listen", f"127.0.0.1:{pa}", "--upstream", auth_echo]).wait_port(pa))
+            rc1, o1 = run([t["curl"], "-s", f"http://127.0.0.1:{ph}/inspect"], env={"NO_PROXY": "*"})
+            rc2, o2 = run([t["curl"], "-s", "-i", f"http://127.0.0.1:{pa}/inspect"], env={"NO_PROXY": "*"})
+            ok = rc1 == 0 and '"identity":"alice"' in o1 and " 401" in o2 and "x-beep-error-code: 530" in o2.lower()
+            record("gateway", "SASL PLAIN (proxy credentials -> identity; 401 without)", 0 if ok else 1, f"{o1} | {o2}")
 
         # ---- cross-language matrix ---------------------------------------------------------------
         servers = {"Rust": echo}

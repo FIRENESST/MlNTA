@@ -226,7 +226,7 @@ async fn wire_level_conformance() {
     read_until(&mut tcp, &mut got, &mut buf, b"END\r\n").await;
     let text = String::from_utf8_lossy(&got).to_string();
     assert!(text.starts_with("RPY 0 0 . 0 "), "{text}");
-    assert!(text.contains("<greeting><profile uri='urn:minta:beep:rpc:1' /></greeting>"), "{text}");
+    assert!(text.contains("<greeting><profile uri='urn:minta:beep:rpc:1' /><profile uri='urn:minta:beep:rpc:2' /></greeting>"), "{text}");
 
     let greeting = b"Content-Type: application/beep+xml\r\n\r\n<greeting />\r\n";
     tcp.write_all(format!("RPY 0 0 . 0 {}\r\n", greeting.len()).as_bytes()).await.unwrap();
@@ -266,6 +266,147 @@ async fn wire_level_conformance() {
         }
     }
     assert!(closed);
+}
+
+/// Streaming handler for rpc:2: `/duplex` echoes every request chunk as soon as it arrives
+/// and ends with trailers; `/count` consumes the body without buffering it.
+struct Duplex;
+
+#[async_trait]
+impl RpcHandler for Duplex {
+    fn streaming(&self) -> bool {
+        true
+    }
+    async fn handle(&self, mut req: RpcServerRequest) -> Result<RpcServerResponse, RpcFailure> {
+        let mut body = req.stream.take().expect("streaming handler gets a stream");
+        if req.target == "/count" {
+            let mut n = 0usize;
+            while let Some(p) = body.next().await.map_err(|e| RpcFailure::new(e.beep_code(), e.to_string()))? {
+                if let RequestPart::Data(b) = p {
+                    n += b.len();
+                }
+            }
+            return Ok(RpcServerResponse::full(200, vec![], n.to_string()));
+        }
+        let (resp, tx) = RpcServerResponse::frames(200, vec![("X-Profile".into(), req.profile.into())]);
+        tokio::spawn(async move {
+            let mut req_trailer = String::new();
+            loop {
+                let item = match body.next().await {
+                    Ok(Some(RequestPart::Data(b))) => BodyItem::Data(b),
+                    Ok(Some(RequestPart::Trailers(t))) => {
+                        req_trailer = t.iter().find(|(k, _)| k == "X-T").map(|(_, v)| v.clone()).unwrap_or_default();
+                        continue;
+                    }
+                    Ok(None) => BodyItem::Trailers(vec![("X-Done".into(), "yes".into()), ("X-Req-T".into(), req_trailer.clone())]),
+                    Err(e) => BodyItem::Abort(format!("request aborted: {e}")),
+                };
+                let last = !matches!(item, BodyItem::Data(_));
+                if tx.send(item).await.is_err() || last {
+                    return;
+                }
+            }
+        });
+        Ok(resp)
+    }
+}
+
+#[tokio::test]
+async fn rpc2_duplex_trailers_abort_and_unbounded_upload() {
+    let s = RpcServer::bind("127.0.0.1:0", Duplex, Config::default()).await.unwrap();
+    let addr = s.local_addr().unwrap();
+    tokio::spawn(s.serve());
+    let client = RpcClient::new(addr.to_string(), ClientOptions::default());
+
+    // Full duplex: each echo must arrive before the next chunk is even written.
+    let (mut w, pending) = client.call_duplex(RpcRequest::new("POST", "/duplex"), None).await.unwrap();
+    assert!(w.is_streaming());
+    w.send(Bytes::from_static(b"one")).await.unwrap();
+    let (head, mut body) = pending.response().await.unwrap();
+    assert_eq!((head.status, head.header("X-Profile")), (200, Some(RPC_PROFILE_V2)));
+    assert_eq!(&body.chunk().await.unwrap().unwrap()[..], b"one");
+    w.send(Bytes::from_static(b"two")).await.unwrap();
+    assert_eq!(&body.chunk().await.unwrap().unwrap()[..], b"two");
+    w.finish(vec![("X-T".into(), "42".into())]).await.unwrap();
+    assert!(body.chunk().await.is_none());
+    let t = body.trailers().expect("trailers");
+    assert!(t.contains(&("X-Done".to_string(), "yes".to_string())) && t.contains(&("X-Req-T".to_string(), "42".to_string())), "{t:?}");
+
+    // Dropping the writer mid-body is an abort the server can tell from a normal end.
+    let (mut w, pending) = client.call_duplex(RpcRequest::new("POST", "/duplex"), None).await.unwrap();
+    w.send(Bytes::from_static(b"x")).await.unwrap();
+    let (_, mut body) = pending.response().await.unwrap();
+    assert_eq!(&body.chunk().await.unwrap().unwrap()[..], b"x");
+    drop(w);
+    match body.chunk().await {
+        Some(Err(RpcError::Aborted(reason))) => assert!(reason.contains("request aborted"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+
+    // Streamed bodies are not bound by max_message_size (64 MiB): send 80 MiB.
+    let (mut w, pending) = client.call_duplex(RpcRequest::new("PUT", "/count"), None).await.unwrap();
+    let block = Bytes::from(vec![7u8; 1 << 20]);
+    let sender = tokio::spawn(async move {
+        for _ in 0..80 {
+            w.send(block.clone()).await.unwrap();
+        }
+        w.finish(vec![]).await.unwrap();
+    });
+    let (head, body) = pending.response().await.unwrap();
+    assert_eq!(head.status, 200);
+    assert_eq!(&body.collect(64).await.unwrap()[..], (80usize << 20).to_string().as_bytes());
+    sender.await.unwrap();
+
+    // Channels are recycled after duplex calls.
+    let r = client.call(RpcRequest::new("PUT", "/count").body("abc")).await.unwrap();
+    assert_eq!(&r.body[..], b"3");
+    assert!(client.status()[0] <= 3, "{:?}", client.status());
+}
+
+#[tokio::test]
+async fn rpc2_client_falls_back_to_rpc1_peer() {
+    let l = Listener::bind("127.0.0.1:0", Config::default(), Profiles::new().with(RPC_PROFILE, RpcProfile::new(rpc_handler()))).await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(l.serve());
+    let client = RpcClient::new(addr.to_string(), ClientOptions::default());
+    let (mut w, pending) = client.call_duplex(RpcRequest::new("POST", "/echo"), None).await.unwrap();
+    assert!(!w.is_streaming(), "an rpc:1 peer gets a buffered body");
+    w.send(Bytes::from_static(b"hello ")).await.unwrap();
+    w.send(Bytes::from_static(b"rpc1")).await.unwrap();
+    w.finish(vec![("X-Dropped".into(), "1".into())]).await.unwrap();
+    let (head, body) = pending.response().await.unwrap();
+    assert_eq!(head.status, 201);
+    assert_eq!(&body.collect(1024).await.unwrap()[..], b"hello rpc1");
+    match client.call_duplex(RpcRequest::new("GET", "/ws").header(H_UPGRADE, "websocket"), None).await {
+        Err(RpcError::Remote { code: 504, .. }) => {}
+        other => panic!("upgrade over rpc:1 must be refused, got {:?}", other.map(|_| ())),
+    }
+}
+
+#[tokio::test]
+async fn sasl_plain_required_before_rpc() {
+    let auth = |_authzid: &str, user: &str, pass: &str| (user == "alice" && pass == "s3cret").then(|| user.to_string());
+    let who = handler_fn(|req: RpcServerRequest| async move { Ok(RpcServerResponse::full(200, vec![], req.identity.unwrap_or_default())) });
+    let profiles = rpc_profiles(who).with(sasl::SASL_PLAIN, sasl::PlainServer::new(auth));
+    let l = Listener::bind("127.0.0.1:0", Config { require_auth: true, ..Config::default() }, profiles).await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(l.serve());
+
+    let anonymous = RpcClient::new(addr.clone(), ClientOptions::default());
+    match anonymous.call(RpcRequest::new("GET", "/whoami")).await {
+        Err(e) => assert_eq!((e.beep_code(), e.http_status()), (530, 401), "{e}"),
+        Ok(r) => panic!("unauthenticated call succeeded: {r:?}"),
+    }
+    let wrong = RpcClient::new(addr.clone(), ClientOptions { sasl: Some(sasl::PlainCredentials::new("alice", "nope")), ..Default::default() });
+    match wrong.call(RpcRequest::new("GET", "/whoami")).await {
+        Err(e) => assert_eq!((e.beep_code(), e.http_status()), (535, 401), "{e}"),
+        Ok(r) => panic!("bad password accepted: {r:?}"),
+    }
+    let alice = RpcClient::new(addr, ClientOptions { sasl: Some(sasl::PlainCredentials::new("alice", "s3cret")), ..Default::default() });
+    for _ in 0..3 {
+        let r = alice.call(RpcRequest::new("GET", "/whoami")).await.unwrap();
+        assert_eq!(&r.body[..], b"alice");
+    }
 }
 
 #[tokio::test]

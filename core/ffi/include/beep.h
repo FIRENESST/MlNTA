@@ -62,6 +62,12 @@ BEEP_API beep_client *beep_client_new(const char *address, int sessions, int max
 /* Same, negotiating the BEEP TLS profile. ca_file may be NULL (system/Mozilla roots). */
 BEEP_API beep_client *beep_client_new_tls(const char *address, int sessions, int max_channels, int timeout_ms,
                                           const char *server_name, const char *ca_file);
+/* Optional TLS (server_name NULL = plain TCP) plus SASL PLAIN authentication on every session
+ * (sasl_user NULL = none). Calls then fail with BEEP_E_CONNECT and beep_last_error_code() 535
+ * for bad credentials, or 530 when the listener requires authentication and none was given. */
+BEEP_API beep_client *beep_client_new_auth(const char *address, int sessions, int max_channels, int timeout_ms,
+                                           const char *server_name, const char *ca_file,
+                                           const char *sasl_user, const char *sasl_password);
 BEEP_API void beep_client_free(beep_client *client);
 
 /* Perform one request. headers: "Name: value" lines separated by "\n" or "\r\n" (may be NULL).

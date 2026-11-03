@@ -212,7 +212,14 @@ pub struct BeepResponse {
     body: Vec<u8>,
 }
 
-fn new_client(address: Option<&str>, sessions: c_int, max_channels: c_int, timeout_ms: c_int, tls: Option<minta_beep::tls::TlsClientOptions>) -> *mut BeepClient {
+fn new_client(
+    address: Option<&str>,
+    sessions: c_int,
+    max_channels: c_int,
+    timeout_ms: c_int,
+    tls: Option<minta_beep::tls::TlsClientOptions>,
+    sasl: Option<minta_beep::sasl::PlainCredentials>,
+) -> *mut BeepClient {
     let Some(addr) = address.filter(|a| !a.is_empty()) else {
         set_error("address is required", 0);
         return ptr::null_mut();
@@ -222,6 +229,7 @@ fn new_client(address: Option<&str>, sessions: c_int, max_channels: c_int, timeo
         max_channels: if max_channels > 0 { max_channels as usize } else { 64 },
         request_timeout: if timeout_ms > 0 { Some(Duration::from_millis(timeout_ms as u64)) } else { None },
         tls,
+        sasl,
         ..Default::default()
     };
     let _rt = runtime().enter();
@@ -231,7 +239,7 @@ fn new_client(address: Option<&str>, sessions: c_int, max_channels: c_int, timeo
 
 #[no_mangle]
 pub unsafe extern "C" fn beep_client_new(address: *const c_char, sessions: c_int, max_channels: c_int, timeout_ms: c_int) -> *mut BeepClient {
-    guard(ptr::null_mut(), || new_client(cstr(address), sessions, max_channels, timeout_ms, None))
+    guard(ptr::null_mut(), || new_client(cstr(address), sessions, max_channels, timeout_ms, None, None))
 }
 
 #[no_mangle]
@@ -249,7 +257,25 @@ pub unsafe extern "C" fn beep_client_new_tls(
             return ptr::null_mut();
         };
         let tls = minta_beep::tls::TlsClientOptions { server_name: name.to_string(), ca_file: cstr(ca_file).map(Into::into) };
-        new_client(cstr(address), sessions, max_channels, timeout_ms, Some(tls))
+        new_client(cstr(address), sessions, max_channels, timeout_ms, Some(tls), None)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn beep_client_new_auth(
+    address: *const c_char,
+    sessions: c_int,
+    max_channels: c_int,
+    timeout_ms: c_int,
+    server_name: *const c_char,
+    ca_file: *const c_char,
+    sasl_user: *const c_char,
+    sasl_password: *const c_char,
+) -> *mut BeepClient {
+    guard(ptr::null_mut(), || {
+        let tls = cstr(server_name).map(|n| minta_beep::tls::TlsClientOptions { server_name: n.to_string(), ca_file: cstr(ca_file).map(Into::into) });
+        let sasl = cstr(sasl_user).map(|u| minta_beep::sasl::PlainCredentials::new(u, cstr(sasl_password).unwrap_or_default()));
+        new_client(cstr(address), sessions, max_channels, timeout_ms, tls, sasl)
     })
 }
 

@@ -15,22 +15,72 @@ pub fn full(b: impl Into<Bytes>) -> GwBody {
     Full::new(b.into()).map_err(|e| match e {}).boxed()
 }
 
-/// Body fed from a channel; an `Err` item aborts the HTTP response.
+pub type FrameTx = mpsc::Sender<Result<Frame<Bytes>, BoxError>>;
+
+/// Body fed from a channel of frames (data, then optionally trailers); an `Err` item
+/// aborts the HTTP message.
 pub struct ChannelBody {
-    pub rx: mpsc::Receiver<Result<Bytes, BoxError>>,
+    rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>,
+}
+
+impl ChannelBody {
+    pub fn channel(capacity: usize) -> (FrameTx, GwBody) {
+        let (tx, rx) = mpsc::channel(capacity);
+        (tx, ChannelBody { rx }.boxed())
+    }
 }
 
 impl Body for ChannelBody {
     type Data = Bytes;
     type Error = BoxError;
     fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
-        match self.rx.poll_recv(cx) {
-            Poll::Ready(Some(Ok(b))) => Poll::Ready(Some(Ok(Frame::data(b)))),
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+        self.rx.poll_recv(cx)
+    }
+}
+
+/// A body with known data followed by trailers.
+pub fn with_trailers(data: Bytes, trailers: HeaderMap) -> GwBody {
+    let (tx, body) = ChannelBody::channel(2);
+    if !data.is_empty() {
+        let _ = tx.try_send(Ok(Frame::data(data)));
+    }
+    let _ = tx.try_send(Ok(Frame::trailers(trailers)));
+    body
+}
+
+/// Header pairs → a `HeaderMap`, skipping names/values HTTP cannot carry.
+pub fn header_map(pairs: &[(String, String)]) -> HeaderMap {
+    let mut m = HeaderMap::new();
+    for (k, v) in pairs {
+        if let (Ok(n), Ok(val)) = (http::HeaderName::from_bytes(k.as_bytes()), http::HeaderValue::from_str(v)) {
+            m.append(n, val);
         }
     }
+    m
+}
+
+/// `TE: trailers` is the one TE value that must cross the bridge: gRPC requires it.
+pub fn wants_trailers(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(http::header::TE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|t| t.trim().eq_ignore_ascii_case("trailers"))
+}
+
+/// The protocol of an HTTP/1.1 upgrade request (`Connection: upgrade` + `Upgrade: …`).
+pub fn upgrade_protocol(headers: &HeaderMap) -> Option<String> {
+    let connection_upgrade = headers
+        .get_all(http::header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|t| t.trim().eq_ignore_ascii_case("upgrade"));
+    if !connection_upgrade {
+        return None;
+    }
+    headers.get(http::header::UPGRADE).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 const HOP_BY_HOP: [&str; 10] = [

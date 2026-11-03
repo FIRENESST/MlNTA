@@ -67,5 +67,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # backend.py PORT [CERT KEY]   (with CERT/KEY it serves HTTPS)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    if len(sys.argv) > 3:
+        import ssl
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(sys.argv[2], sys.argv[3])
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+    server.serve_forever()

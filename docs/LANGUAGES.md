@@ -68,6 +68,18 @@
 | OCaml | `sdk/ocaml`（cohttp-lwt-unix，链接需 `-thread`） | ✅ W L（W 5.4 + cohttp 6.3，L 4.14 + cohttp 5.3） |
 | 其它（Kotlin/Swift/Dart 的 HTTP 客户端、ABAP、MATLAB、LabVIEW、Excel VBA……） | 直接发 HTTP 到网关 | — |
 
+## 协议级桥接（任何语言，经网关）
+
+| 能力 | 用法 | 状态 |
+|---|---|---|
+| **gRPC**（unary / 服务端流 / 客户端流 / 双向流、metadata、trailer、状态码、deadline） | gRPC 客户端明文 h2c 连 `beepgw proxy`；对端 `beepgw expose --backend h2c://…` | ✅ W L（grpcio ↔ grpcio，W 1.80、L 1.51） |
+| **WebSocket**（HTTP/1.1 Upgrade，握手端到端） | `ws://网关/…`；对端 `beepgw expose --backend http://…` | ✅ W L（websockets W 16、L 10.4） |
+| 流式上传（长度未知、不限大小） | 普通 HTTP 分块上传 | ✅ W L（80 MiB + CRC 校验） |
+| SASL PLAIN 认证 | `--sasl-user` / `--sasl-users`，身份以 `X-Beep-User` 到后端；C ABI `beep_client_new_auth` | ✅ W L |
+| HTTPS 后端 | `beepgw expose --backend https://… [--backend-ca …]` | ✅ W L |
+
+这些能力依赖 `urn:minta:beep:rpc:2`（docs/PROTOCOL.md §2.6）：网关与 Rust 核心之间自动协商；原生库仍以 rpc:1 互通。
+
 ## 入向：现有后端零改动挂到 BEEP
 
 ```bash

@@ -20,8 +20,9 @@
 └───────────────────────────┘
 ```
 
-- **BEEP 层**：完整实现帧格式、SEQ 滑动窗口流控、通道管理（start/close/greeting）、MSG/RPY/ERR/ANS/NUL、TLS 调谐 profile。
+- **BEEP 层**：完整实现帧格式、SEQ 滑动窗口流控、通道管理（start/close/greeting）、MSG/RPY/ERR/ANS/NUL、TLS 调谐 profile、SASL PLAIN 认证。
 - **RPC profile `urn:minta:beep:rpc:1`**：在 BEEP 通道上承载 HTTP 语义请求（方法、目标、头、二进制体、状态码、流式应答）。
+- **RPC profile `urn:minta:beep:rpc:2`**（rpc:1 的超集，自动协商、自动回落）：流式请求体（不限大小）、全双工、请求/应答 trailer、协议升级——因此 **gRPC**（四种调用模式）和 **WebSocket** 都能经网关穿过 BEEP。
 - 规范：[docs/PROTOCOL.md](docs/PROTOCOL.md) · 语言覆盖矩阵：[docs/LANGUAGES.md](docs/LANGUAGES.md)
 
 ## 三种接入方式
@@ -56,6 +57,25 @@ beepgw expose --listen 0.0.0.0:10289 --backend http://127.0.0.1:3000
 
 # 4) 命令行直接发 BEEP 请求（类似 curl）
 beepgw call --upstream 127.0.0.1:10288 -i POST /echo -d 'hi'
+```
+
+gRPC 与 WebSocket（任何语言的 gRPC / WebSocket 库，零改动）：
+
+```bash
+# BEEP 另一侧：把 gRPC 服务（h2c）和 WebSocket 服务挂到 BEEP
+beepgw expose --listen 0.0.0.0:10290 --backend h2c://127.0.0.1:50051
+beepgw expose --listen 0.0.0.0:10291 --backend http://127.0.0.1:9000
+# 应用侧：gRPC 客户端（明文 h2c）连 8090，WebSocket 客户端连 ws://127.0.0.1:8091/...
+beepgw proxy --listen 127.0.0.1:8090 --upstream 10.0.0.5:10290
+beepgw proxy --listen 127.0.0.1:8091 --upstream 10.0.0.5:10291
+```
+
+认证（SASL PLAIN，建议配合 TLS；身份以 `X-Beep-User` 交给后端）：
+
+```bash
+printf 'alice:sha256:%s\n' "$(printf %s 's3cret' | sha256sum | cut -d' ' -f1)" > users.txt
+beepgw expose --listen 0.0.0.0:10289 --backend https://api.internal --sasl-users users.txt --tls-cert c.pem --tls-key k.pem
+beepgw proxy --upstream gw.internal:10289 --tls-server-name gw.internal --sasl-user alice   # 口令取自 $BEEPGW_SASL_PASSWORD
 ```
 
 完整配置（多上游、路由、TLS、JSON-Lines、入向）：[core/gateway/beepgw.example.toml](core/gateway/beepgw.example.toml)，`beepgw run -c beepgw.toml`。
@@ -161,14 +181,14 @@ BEEP 层失败时返回映射后的 HTTP 状态 + `X-Beep-Error-Code` + `{"error
 python tests/run_all.py --build
 ```
 
-一条命令构建并运行全部测试：Rust 核心单元/集成测试、6 个原生库各自的全套用例（与 Rust 服务端互通 + 本语言自通 + 极小窗口大消息 + 流水线 + ANS 流 + 中止 + ERR + 超时回收 + TLS 双向）、14 个 FFI 绑定、13 个网关 SDK、4 种 JVM 语言、JSON-Lines、入向链路，以及 **4 种客户端 × 6 种服务端** 的跨语言矩阵。找不到工具链的语言自动跳过。
+一条命令构建并运行全部测试：Rust 核心单元/集成测试（含 rpc:2 全双工、trailer、中止、80 MiB 流式上传、回落 rpc:1、SASL）、6 个原生库各自的全套用例（与 Rust 服务端互通 + 本语言自通 + 极小窗口大消息 + 流水线 + ANS 流 + 中止 + ERR + 超时回收 + TLS 双向）、14 个 FFI 绑定、13 个网关 SDK、4 种 JVM 语言、JSON-Lines、入向链路（含 HTTPS 后端）、**真实 gRPC（grpcio ↔ grpcio：unary/服务端流/客户端流/交替 bidi/错误码/超时）**、**真实 WebSocket**、SASL，以及 **4 种客户端 × 6 种服务端** 的跨语言矩阵。找不到工具链的语言自动跳过。
 
 最近一次结果：
 
 | 平台 | 结果 | 工具链 |
 |---|---|---|
-| Ubuntu 24.04（WSL2） | **66 通过，0 失败，0 跳过** | Rust 1.99 / Python 3.12 / Node 18 / JDK 21 / .NET 8 / Go 1.22 / PHP 8.3 / Ruby 3.2 / Zig 0.17 / GCC 13，以及 LuaJIT、Swift 6.4、Nim、Dart 3.13、Julia 1.13、FPC、LDC、GnuCOBOL、R、Elixir、Erlang、GHC、Crystal、Lua、OCaml、Kotlin、Scala 3、Groovy、Clojure |
-| Windows 11 | **66 通过，0 失败，0 跳过** | Rust 1.98 / Python 3.13 / Node 24 / JDK 21 / .NET 10 / Go 1.27 / PHP 8.5 / Ruby 4.0 / Zig 0.17 / GCC 16，以及 LuaJIT、Swift 6.4、Nim 2.4、Dart 3.13、Julia 1.13、FPC 3.2、LDC 1.43、GnuCOBOL 3.2、R 4.6、Elixir 1.20、Erlang/OTP 29、GHC 9.10、Crystal 1.22、Lua 5.4、OCaml 5.4、Kotlin、Scala 3、Groovy、Clojure |
+| Ubuntu 24.04（WSL2） | **71 通过，0 失败，0 跳过** | Rust 1.99 / Python 3.12 / Node 18 / JDK 21 / .NET 8 / Go 1.22 / PHP 8.3 / Ruby 3.2 / Zig 0.17 / GCC 13，以及 LuaJIT、Swift 6.4、Nim、Dart 3.13、Julia 1.13、FPC、LDC、GnuCOBOL、R、Elixir、Erlang、GHC、Crystal、Lua、OCaml、Kotlin、Scala 3、Groovy、Clojure |
+| Windows 11 | **71 通过，0 失败，0 跳过** | Rust 1.98 / Python 3.13 / Node 24 / JDK 21 / .NET 10 / Go 1.27 / PHP 8.5 / Ruby 4.0 / Zig 0.17 / GCC 16，以及 LuaJIT、Swift 6.4、Nim 2.4、Dart 3.13、Julia 1.13、FPC 3.2、LDC 1.43、GnuCOBOL 3.2、R 4.6、Elixir 1.20、Erlang/OTP 29、GHC 9.10、Crystal 1.22、Lua 5.4、OCaml 5.4、Kotlin、Scala 3、Groovy、Clojure |
 
 Windows 上补齐工具链时的几个坑（`tests/run_all.py` 已处理或注明）：
 
@@ -188,14 +208,15 @@ bindings/        C ABI 绑定：c cpp fortran ruby php zig luajit swift nim dart
 sdk/             网关 SDK：shell powershell perl tcl php ruby r elixir erlang haskell crystal lua ocaml
 examples/        fsharp vbnet jvm(kotlin scala clojure groovy)
 docs/            PROTOCOL.md（规范）LANGUAGES.md（覆盖矩阵）
-tests/           run_all.py（总测试）backend.py clients/
+tests/           run_all.py（总测试）backend.py clients/ grpc_test.py ws_test.py stream_test.py
 ```
 
 ## 已知限制
 
-- **SASL** 未实现（RFC 3080 §3.2）；认证建议走 TLS 客户端证书或应用层头。
-- **TLS**：采用标准 TLS 调谐 profile，在会话开始时协商；监听端配置 TLS 后要求所有会话先走 TLS。网关入向的 **HTTP 后端**只支持 `http://`（同机/内网部署，或前置 TLS 终结）。
-- 请求体在网关和客户端侧**整包发送**（默认上限 64 MiB）；响应体支持流式（ANS）。
-- 不桥接 HTTP **trailers**，因此 gRPC 不能经网关透传（gRPC 依赖 trailers）；WebSocket 未桥接。
+- **SASL** 只实现了 PLAIN（RFC 4616），没有 SASL 安全层；口令以明文传输，需配合 TLS。SCRAM、EXTERNAL（TLS 客户端证书）未实现。
+- **rpc:2**（流式请求、全双工、trailer、升级）由 Rust 核心、网关和 C ABI 客户端支持；Python/Node/Java/.NET/Go 原生库实现的是 rpc:1，与 rpc:2 对端自动回落互通，但它们自身不能发流式请求或做升级。
+- **TLS**：采用标准 TLS 调谐 profile，在会话开始时协商；监听端配置 TLS 后要求所有会话先走 TLS。
+- WebSocket 只支持 HTTP/1.1 `Upgrade`；HTTP/2 上的 WebSocket（RFC 8441 扩展 CONNECT）未桥接。gRPC 走明文 h2c 接网关（网关出向不做 TLS 终结）。
+- 上游只有 rpc:1 时，网关对流式请求体做缓冲（上限 `max_body_bytes`，默认 64 MiB）。
 - 未测：macOS（`libbeep.dylib` 路径已写但没有 Mac 可跑）、Delphi（Pascal 绑定只用 Free Pascal 测过）、Flutter（Dart 绑定只在 Dart VM 上测过）。
 - Git Bash 用户注意：`beepgw call ... GET /path` 中的 `/path` 会被 MSYS 改写成 Windows 路径，请设 `MSYS_NO_PATHCONV=1`。

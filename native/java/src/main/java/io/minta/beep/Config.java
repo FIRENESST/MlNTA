@@ -1,6 +1,6 @@
 package io.minta.beep;
 
-/** Session tuning. Defaults follow docs/PROTOCOL.md §1.6. */
+/** Session tuning. Defaults follow docs/PROTOCOL.md §1.8. */
 public final class Config {
     public int recvWindow = 262_144;
     public int maxFrameSize = 65_536;

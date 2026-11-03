@@ -12,16 +12,18 @@
 //! # Ok(()) }
 //! ```
 
+pub mod chunked;
 pub mod error;
 pub mod frame;
 pub mod mgmt;
 pub mod mime;
 pub mod rpc;
+pub mod sasl;
 pub mod session;
 #[cfg(feature = "tls")]
 pub mod tls;
 
 pub use error::{code, Error, Result};
 pub use mime::{Entity, Headers};
-pub use rpc::{RpcClient, RpcRequest, RpcResponse, RPC_PROFILE};
-pub use session::{Channel, Config, IncomingMessage, Listener, ProfileHandler, Profiles, Reply, ReplyEvent, ReplyStream, Responder, Role, Session};
+pub use rpc::{RpcClient, RpcRequest, RpcResponse, RPC_PROFILE, RPC_PROFILE_V2};
+pub use session::{Channel, Config, IncomingMessage, Listener, MsgSink, ProfileHandler, Profiles, Reply, ReplyEvent, ReplyStream, Responder, Role, Session};
