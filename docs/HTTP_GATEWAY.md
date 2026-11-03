@@ -14,7 +14,11 @@
 
 逐跳头以及 `Connection` 指定的头不跨网关；`TE: trailers` 保留。每个内部 gRPC data 包最多 64 KiB，单包解码上限 128 KiB；大文件通过多个包流式发送。HTTP/2 扩展 CONNECT 不在当前实现中。
 
-路由采用最长前缀匹配。可选 `X-Minta-Upstream` 选择配置中的上游，`X-Minta-Timeout-Ms` 指定更短截止时间。迁移旧客户端时接受同义的 `X-Beep-Upstream`、`X-Beep-Timeout-Ms`；这些控制头不交给后端。
+路由采用最长前缀匹配，按整段路径匹配：前缀 `/api` 匹配 `/api`、`/api/x`、`/api?q`，不匹配 `/apiary`。可选 `X-Minta-Upstream` 选择配置中的上游，`X-Minta-Timeout-Ms` 指定更短截止时间。迁移旧客户端时接受同义的 `X-Beep-Upstream`、`X-Beep-Timeout-Ms`；这些控制头不交给后端。任何能访问入口的客户端都能用 `X-Minta-Upstream` 选中任一已配置上游，路由不是访问控制。
+
+含 `.` 或 `..` 路径段（包括 `%2e` 编码形式）的目标返回 400，避免越出后端基础路径（如 `https://host/base`）；`..hidden` 这类普通段名不受影响。
+
+网关自身占用 `/healthz`、`/readyz`、`/openapi.json`、`/v1/call` 和 `/__beep/health`，后端同名路径无法经普通 HTTP 透传访问。
 
 ## `POST /v1/call`
 
@@ -53,6 +57,8 @@
 两侧 `max_body_bytes` 分别限制请求体累计字节数，默认 64 MiB。已知长度、chunked、JSON/base64 均执行限制，JSON 另有编码层大小保护。大上传需要同时调高两侧配置；升级后的 WebSocket 隧道不受上传大小限制。
 
 `max_response_bytes` 只限制 `/v1/call` 缓冲应答，默认 64 MiB。普通 HTTP 响应按块转发。两侧 `max_in_flight` 默认 64；额度随调用/应答体生命周期释放，排队受调用截止时间约束。
+
+网关间所有调用共用一条 HTTP/2 连接。网关拥有的每一跳（h2c 入口、网关间 gRPC、h2c/h2 后端）每个流的接收窗口为 1 MiB，连接窗口覆盖全部并发流的窗口之和：读得慢或不读的客户端/后端只占住自己那个流，不会冻结同一连接上的其它调用。最坏情况下每条连接缓冲 `max_in_flight` × 1 MiB。
 
 `timeout_ms` 默认 30000，覆盖调用及其流的总时长；调用者只能指定更短时间，后端网关也有自身上限。长连接须调高两侧配置。断开连接、丢弃 body、超时会取消对应 gRPC 流并停止后端 I/O。内部协议要求显式 End，缺失 End 视为中止，不能当作成功的短请求/应答。
 

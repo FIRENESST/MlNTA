@@ -77,6 +77,14 @@ fn duration(ms: Option<u64>, default: u64) -> Result<Duration, Status> {
     Ok(Duration::from_millis(ms.min(default)))
 }
 
+/// Prefixes match whole path segments: `/api` covers `/api`, `/api/x` and `/api?q`,
+/// not `/apiary`. A prefix ending in `/` already marks its own boundary.
+fn prefix_matches(prefix: &str, target: &str) -> bool {
+    target.strip_prefix(prefix).is_some_and(|rest| {
+        prefix.ends_with('/') || rest.is_empty() || rest.starts_with(['/', '?'])
+    })
+}
+
 fn route<'a>(
     st: &'a State,
     explicit: Option<&str>,
@@ -88,7 +96,7 @@ fn route<'a>(
             .cfg
             .routes
             .iter()
-            .filter(|r| target.starts_with(&r.prefix))
+            .filter(|r| prefix_matches(&r.prefix, target))
             .max_by_key(|r| r.prefix.len())
         {
             name = &r.upstream;
@@ -470,6 +478,14 @@ async fn handle(
 pub async fn serve(st: State) -> Result<(), BoxError> {
     let listener = TcpListener::bind(&st.cfg.listen).await?;
     tracing::info!("HTTP/JSON gateway listening on {}", listener.local_addr()?);
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    // An h2c client multiplexes calls on one connection; see transport::connection_window.
+    builder
+        .http2()
+        .max_concurrent_streams(st.cfg.max_in_flight.min(u32::MAX as usize) as u32)
+        .initial_stream_window_size(transport::STREAM_WINDOW)
+        .initial_connection_window_size(transport::connection_window(st.cfg.max_in_flight));
+    let builder = Arc::new(builder);
     let state = Arc::new(st);
     loop {
         let (tcp, peer) = tokio::select! {
@@ -478,9 +494,9 @@ pub async fn serve(st: State) -> Result<(), BoxError> {
         };
         let _ = tcp.set_nodelay(true);
         let state = state.clone();
+        let builder = builder.clone();
         tokio::spawn(async move {
             let service = service_fn(move |req| handle(req, state.clone(), peer));
-            let builder = auto::Builder::new(TokioExecutor::new());
             if let Err(e) = builder
                 .serve_connection_with_upgrades(TokioIo::new(tcp), service)
                 .await

@@ -35,6 +35,27 @@ pub const CHUNK: usize = 64 * 1024;
 const MAX_PACKET: usize = 128 * 1024;
 const MAX_HEADERS: usize = 64 * 1024;
 
+/// HTTP/2 receive window of each stream, on every hop the gateway owns.
+pub const STREAM_WINDOW: u32 = 1 << 20;
+const MAX_WINDOW: u32 = (1 << 31) - 1;
+
+/// Hyper releases connection-level flow control only as each stream's data is consumed.
+/// Unless the connection window covers every stream's full window, a few streams whose
+/// readers stall use it up and freeze every other call sharing the connection.
+pub fn connection_window(streams: usize) -> u32 {
+    (u64::from(STREAM_WINDOW) * streams.max(1) as u64).min(u64::from(MAX_WINDOW)) as u32
+}
+
+/// True when the path holds a `.` or `..` segment, literal or percent-encoded.
+/// Backends would resolve them and could climb out of a configured base path.
+pub fn has_dot_segment(target: &str) -> bool {
+    let path = target.split(['?', '#']).next().unwrap_or("");
+    path.split('/').any(|segment| {
+        let s = segment.to_ascii_lowercase().replace("%2e", ".");
+        s == "." || s == ".."
+    })
+}
+
 fn packet(payload: Payload) -> Packet {
     Packet {
         payload: Some(payload),
@@ -283,7 +304,10 @@ impl Client {
         let mut endpoint = Endpoint::from_shared(cfg.address.clone())
             .map_err(|e| e.to_string())?
             .connect_timeout(Duration::from_secs(5))
-            .tcp_nodelay(true);
+            .tcp_nodelay(true)
+            // Streams on this connection are bounded by the HTTP listeners' permits.
+            .initial_stream_window_size(STREAM_WINDOW)
+            .initial_connection_window_size(MAX_WINDOW);
         if cfg.address.starts_with("https://") {
             let mut tls = ClientTlsConfig::new().with_webpki_roots();
             if let Some(name) = &cfg.server_name {
@@ -509,8 +533,12 @@ impl Backend {
         };
         Ok(Self {
             uri,
+            // One pooled HTTP/2 connection carries every call to an h2c/h2 backend;
+            // streams on it are bounded by this listener's permits.
             client: HttpClient::builder(TokioExecutor::new())
                 .http2_only(h2c)
+                .http2_initial_stream_window_size(STREAM_WINDOW)
+                .http2_initial_connection_window_size(MAX_WINDOW)
                 .build(connector(true)),
             http1: HttpClient::builder(TokioExecutor::new()).build(connector(false)),
             h2c,
@@ -521,6 +549,11 @@ impl Backend {
         if !head.target.starts_with('/') || head.target.starts_with("//") {
             return Err(Status::invalid_argument(
                 "target must be an origin-form path starting with /",
+            ));
+        }
+        if has_dot_segment(&head.target) {
+            return Err(Status::invalid_argument(
+                "target must not contain . or .. path segments",
             ));
         }
         let uri = Uri::builder()
@@ -807,8 +840,10 @@ pub async fn serve(cfg: GrpcListener) -> Result<(), Box<dyn std::error::Error + 
     let backend = Backend::new(&cfg)?;
     let token = config::token(&cfg.token_env)?;
     let permits = Arc::new(Semaphore::new(cfg.max_in_flight));
-    let mut server =
-        Server::builder().max_concurrent_streams(cfg.max_in_flight.min(u32::MAX as usize) as u32);
+    let mut server = Server::builder()
+        .max_concurrent_streams(cfg.max_in_flight.min(u32::MAX as usize) as u32)
+        .initial_stream_window_size(STREAM_WINDOW)
+        .initial_connection_window_size(connection_window(cfg.max_in_flight));
     if let (Some(cert), Some(key)) = (&cfg.cert_file, &cfg.key_file) {
         server = server.tls_config(ServerTlsConfig::new().identity(Identity::from_pem(
             std::fs::read(cert)?,

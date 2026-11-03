@@ -35,6 +35,7 @@ PASSED = []
 SKIPPED = []
 ACTIVE_STREAMS = 0
 LOCK = threading.Lock()
+STALL = threading.Event()  # /stall-read waits for this before reading its body
 
 
 def port():
@@ -122,7 +123,15 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/early-reject":
             self.close_connection = True
-            return self.send(b"denied", 403, (("Connection", "close"),))
+            self.send(b"denied", 403, (("Connection", "close"),))
+            self.wfile.flush()
+            # Lingering close: closing with unread upload bytes sends a TCP reset, and
+            # Windows then discards the 403 before the gateway has read it.
+            try: self.read_body()
+            except (OSError, ValueError): pass
+            return
+        if path == "/stall-read":
+            STALL.wait(30)
         body = self.read_body()
         if path == "/echo":
             return self.send(body, headers=(("Content-Type", self.headers.get("Content-Type", "application/octet-stream")), ("Set-Cookie", "a=1"), ("Set-Cookie", "b=2")))
@@ -248,7 +257,12 @@ def main():
                 assert status == 400 and "error" in reply, (doc, status, reply)
             assert request(ph, "/v1/call", b"{}", "POST")[0] == 415
             assert request(ph, "/v1/call")[0] == 405
-        check("invalid envelopes, invalid headers, SSRF target rejection and media type", invalid)
+            # Dot segments would let a client climb out of a backend base path.
+            for target in ("/../inspect", "/a/./inspect", "/a/%2e%2E/inspect", "/a/.%2e?x=1"):
+                assert request(ph, target)[0] == 400, target
+            assert call(ph, {"target": "/x/../inspect"})[0] == 400
+            assert request(ph, "/files/..hidden")[0] == 200
+        check("invalid envelopes, invalid headers, SSRF target rejection, dot segments and media type", invalid)
 
         def limits():
             small, _ = chain(backend, limit=1024, response_limit=1024)
@@ -293,12 +307,58 @@ def main():
             assert replies == [str(i) for i in range(64)]
         check("64 concurrent independent calls", concurrent_calls)
 
+        def stalled_readers():
+            # Every call between two gateways shares one HTTP/2 connection. Streams whose
+            # reader stalls may fill their own window, never the whole connection's.
+            wide, _ = chain(backend, limit=64 << 20, timeout=20_000, concurrency=16)
+
+            def probe(what):
+                started = time.monotonic()
+                c = http.client.HTTPConnection("127.0.0.1", wide, timeout=5)
+                try:
+                    c.request("GET", "/")
+                    assert c.getresponse().read() == b"hello"
+                except TimeoutError:
+                    raise AssertionError(f"an unrelated call froze while {what}")
+                finally:
+                    c.close()
+                assert time.monotonic() - started < 2, what
+
+            stalled = []
+            for _ in range(4):
+                s = socket.create_connection(("127.0.0.1", wide))
+                s.sendall(b"GET /bytes/40960 HTTP/1.1\r\nHost: x\r\n\r\n")  # 10 MiB, never read
+                stalled.append(s)
+            time.sleep(1.5)
+            try: probe("4 clients stall reading 10 MiB downloads")
+            finally:
+                for s in stalled: s.close()
+
+            def upload():
+                c = http.client.HTTPConnection("127.0.0.1", wide, timeout=30)
+                try:
+                    c.request("POST", "/stall-read", b"u" * (16 << 20))
+                    assert c.getresponse().status == 200
+                finally:
+                    c.close()
+            STALL.clear()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                uploads = [pool.submit(upload) for _ in range(4)]
+                time.sleep(1.5)
+                try: probe("4 backends stall reading 16 MiB uploads")
+                finally: STALL.set()
+                for u in uploads: u.result()
+        check("stalled readers in either direction do not block unrelated calls", stalled_readers)
+
         def routes():
             pp, pg = port(), port()
             conf = work / "routes.toml"
-            conf.write_text(f'[[upstream]]\nname="one"\naddress="http://127.0.0.1:{pg}"\n[[http]]\nlisten="127.0.0.1:{pp}"\nupstream="one"\nroutes=[{{prefix="/api/",upstream="one",strip_prefix=true}}]\n[[grpc]]\nlisten="127.0.0.1:{pg}"\nbackend="{backend}"\n')
+            conf.write_text(f'[[upstream]]\nname="one"\naddress="http://127.0.0.1:{pg}"\n[[http]]\nlisten="127.0.0.1:{pp}"\nupstream="one"\nroutes=[{{prefix="/api/",upstream="one",strip_prefix=true}},{{prefix="/v2",upstream="one",strip_prefix=true}}]\n[[grpc]]\nlisten="127.0.0.1:{pg}"\nbackend="{backend}"\n')
             process([GW, "run", "-c", conf], pp)
             assert json.loads(request(pp, "/api/inspect?a=1")[2])["path"] == "/inspect?a=1"
+            # A prefix matches whole path segments: /v2 covers /v2 and /v2/..., not /v2inspect.
+            assert json.loads(request(pp, "/v2/inspect")[2])["path"] == "/inspect"
+            assert request(pp, "/v2inspect")[2] == b"hello"
         check("TOML configuration and path routing", routes)
 
         clients = ROOT / "examples/http"
