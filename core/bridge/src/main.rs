@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use minta_gateway::{
     body::BoxError,
-    config::{Config, GrpcListener, HttpListener, Upstream},
+    config::{self, Config, GrpcListener, HttpListener, Upstream},
     frontend, transport,
 };
 use std::{collections::HashMap, path::PathBuf};
@@ -31,13 +31,13 @@ enum Command {
         server_name: Option<String>,
         #[arg(long)]
         token_env: Option<String>,
-        #[arg(long, default_value_t = 64 << 20)]
+        #[arg(long, default_value_t = config::body_limit())]
         max_body_bytes: usize,
-        #[arg(long, default_value_t = 64 << 20)]
+        #[arg(long, default_value_t = config::body_limit())]
         max_response_bytes: usize,
-        #[arg(long, default_value_t = 30_000)]
+        #[arg(long, default_value_t = config::timeout_ms())]
         timeout_ms: u64,
-        #[arg(long, default_value_t = 64)]
+        #[arg(long, default_value_t = config::concurrency())]
         max_in_flight: usize,
     },
     /// Accept gRPC from another gateway and forward to an unchanged HTTP backend.
@@ -54,11 +54,11 @@ enum Command {
         key_file: Option<PathBuf>,
         #[arg(long)]
         token_env: Option<String>,
-        #[arg(long, default_value_t = 64 << 20)]
+        #[arg(long, default_value_t = config::body_limit())]
         max_body_bytes: usize,
-        #[arg(long, default_value_t = 30_000)]
+        #[arg(long, default_value_t = config::timeout_ms())]
         timeout_ms: u64,
-        #[arg(long, default_value_t = 64)]
+        #[arg(long, default_value_t = config::concurrency())]
         max_in_flight: usize,
     },
     /// Run HTTP listeners, gRPC listeners, named upstreams and routes from TOML.
@@ -160,4 +160,42 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_and_toml_share_defaults() {
+        let Command::Proxy {
+            timeout_ms,
+            max_body_bytes,
+            max_in_flight,
+            ..
+        } = Cli::try_parse_from(["mintagw", "proxy"]).unwrap().command
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (timeout_ms, max_body_bytes, max_in_flight),
+            (60_000, 64 << 20, 64)
+        );
+        let Command::Expose { timeout_ms, .. } =
+            Cli::try_parse_from(["mintagw", "expose", "--backend", "http://b"])
+                .unwrap()
+                .command
+        else {
+            unreachable!()
+        };
+        assert_eq!(timeout_ms, 60_000);
+        let cfg: Config = toml::from_str(
+            "[[http]]\nlisten = \"a\"\nupstream = \"u\"\n[[grpc]]\nlisten = \"b\"\nbackend = \"http://b\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (cfg.http[0].timeout_ms, cfg.grpc[0].timeout_ms),
+            (60_000, 60_000)
+        );
+    }
 }

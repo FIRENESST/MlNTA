@@ -77,8 +77,9 @@ pub struct GrpcListener {
 pub fn body_limit() -> usize {
     64 << 20
 }
+/// Total deadline of a call and its streams, WebSocket tunnels included.
 pub fn timeout_ms() -> u64 {
-    30_000
+    60_000
 }
 pub fn concurrency() -> usize {
     64

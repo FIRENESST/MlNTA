@@ -383,11 +383,17 @@ impl Client {
         let (failure_tx, mut failure) = watch::channel(None::<Status>);
         let upload_cancel = cancel.clone();
         tokio::spawn(async move {
+            let closed = tx.clone();
             if let Err(e) =
                 encode_body(request_body, tx, upload_cancel.clone(), deadline, max).await
             {
-                let _ = failure_tx.send(Some(e));
-                upload_cancel.cancel();
+                // A closed request stream means the peer already finished (or failed) the
+                // call, e.g. an early reply; the response carries the outcome and must not
+                // be cancelled. Dropping the body lets the front end drain the rest.
+                if !closed.is_closed() {
+                    let _ = failure_tx.send(Some(e));
+                    upload_cancel.cancel();
+                }
             }
         });
         let mut rpc = tonic::Request::new(ReceiverStream::new(rx));

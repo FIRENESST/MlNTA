@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body::{Body as HttpBody, Frame, SizeHint};
@@ -73,6 +74,76 @@ impl HttpBody for Body {
     }
     fn size_hint(&self) -> SizeHint {
         self.inner.size_hint()
+    }
+}
+
+/// How long an abandoned request body is still read and discarded.
+const LINGER: Duration = Duration::from_secs(5);
+
+/// A request body that keeps being read when it is dropped before its end, i.e. the
+/// reply finished or failed while the client was still uploading. Hyper then closes the
+/// HTTP/1.1 connection, and closing with unread bytes resets it: the client's upload
+/// fails and it never reads the reply. Up to `budget` further bytes are discarded for
+/// at most `LINGER`, so a client that finishes its upload can read the reply.
+pub struct Lingering<B: HttpBody<Data = Bytes> + Unpin + Send + 'static> {
+    inner: Option<B>,
+    budget: usize,
+}
+
+impl<B: HttpBody<Data = Bytes> + Unpin + Send + 'static> Lingering<B> {
+    pub fn new(body: B, budget: usize) -> Self {
+        Self {
+            inner: Some(body),
+            budget,
+        }
+    }
+}
+
+impl<B: HttpBody<Data = Bytes> + Unpin + Send + 'static> HttpBody for Lingering<B> {
+    type Data = Bytes;
+    type Error = B::Error;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
+        let Some(inner) = self.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let polled = Pin::new(inner).poll_frame(cx);
+        if matches!(polled, Poll::Ready(None | Some(Err(_)))) {
+            self.inner = None;
+        }
+        polled
+    }
+    fn is_end_stream(&self) -> bool {
+        self.inner.as_ref().is_none_or(|b| b.is_end_stream())
+    }
+    fn size_hint(&self) -> SizeHint {
+        self.inner
+            .as_ref()
+            .map_or_else(|| SizeHint::with_exact(0), |b| b.size_hint())
+    }
+}
+
+impl<B: HttpBody<Data = Bytes> + Unpin + Send + 'static> Drop for Lingering<B> {
+    fn drop(&mut self) {
+        let Some(mut body) = self.inner.take().filter(|b| !b.is_end_stream()) else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let mut budget = self.budget;
+        runtime.spawn(async move {
+            let until = tokio::time::Instant::now() + LINGER;
+            while let Ok(Some(Ok(frame))) = tokio::time::timeout_at(until, body.frame()).await {
+                let n = frame.data_ref().map_or(0, Bytes::len);
+                match budget.checked_sub(n) {
+                    Some(rest) => budget = rest,
+                    None => break,
+                }
+            }
+        });
     }
 }
 

@@ -22,7 +22,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
-use crate::body::{Body, BoxError};
+use crate::body::{Body, BoxError, Lingering};
 use crate::config::HttpListener;
 use crate::transport::{self, bounded, Client, CHUNK};
 
@@ -423,7 +423,11 @@ async fn proxy(mut req: Request<Incoming>, st: &State) -> Result<Response<Body>,
     dispatch(
         st,
         client,
-        Request::from_parts(parts, Body::new(incoming)),
+        // The reply may end before the upload does (early reject, limits, errors).
+        Request::from_parts(
+            parts,
+            Body::new(Lingering::new(incoming, st.cfg.max_body_bytes)),
+        ),
         timeout,
         st.cfg.max_body_bytes,
     )

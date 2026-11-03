@@ -43,7 +43,7 @@ curl -H 'Content-Type: application/json' \
 
 普通 HTTP 路径支持流式上传/响应、trailer、gRPC 四种调用模式和 HTTP/1.1 WebSocket Upgrade。`/v1/call` 是有大小上限的缓冲 JSON API。请求体限制在两侧各自生效，默认 64 MiB；大上传需调高两侧 `--max-body-bytes`。JSON 响应另有 `--max-response-bytes` 限制。
 
-`--timeout-ms` 默认 30000，是调用及其流的总时长；长连接应调高两侧配置。断开连接/丢弃应答会取消相应 gRPC 流，释放并发额度并终止后端 I/O。HTTP 入口支持 HTTP/1.1、h2c，入口 HTTPS 可由标准反向代理终结；内部 gRPC 支持 TLS/证书验证和可选 Bearer 认证。
+`--timeout-ms` 默认 60000（60 秒），是调用及其流的总时长；长连接应调高两侧配置。断开连接/丢弃应答会取消相应 gRPC 流，释放并发额度并终止后端 I/O。HTTP 入口支持 HTTP/1.1、h2c，入口 HTTPS 可由标准反向代理终结；内部 gRPC 支持 TLS/证书验证和可选 Bearer 认证。
 
 ```sh
 cargo test --manifest-path core/Cargo.toml --workspace --locked

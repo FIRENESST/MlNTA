@@ -215,6 +215,7 @@ def main():
     assert work.is_relative_to(BUILD.resolve())
     try:
         ph, _ = chain(backend)
+        wide_ph, _ = chain(backend, limit=64 << 20)
 
         def raw():
             blob = bytes(range(256)) * 3000
@@ -228,6 +229,10 @@ def main():
             assert request(ph, "/status/204")[0] == 204
             assert request(ph, "/", method="HEAD")[2] == b""
             assert request(ph, "/early-reject", iter([b"a" * 4096] * 20), "POST", chunks=True)[0] == 403
+            # The reply can finish while the client is still uploading. The gateway must
+            # keep reading (and discarding) the upload, or the reset loses the reply.
+            for _ in range(3):
+                assert request(wide_ph, "/early-reject", iter([b"a" * 65536] * 128), "POST", chunks=True)[0] == 403
             try: request(ph, "/broken")
             except http.client.IncompleteRead: pass
             else: raise AssertionError("truncated response was accepted")
