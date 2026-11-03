@@ -26,6 +26,7 @@ WIN = platform.system() == "Windows"
 EXE = ".exe" if WIN else ""
 LIBNAME = "beep.dll" if WIN else ("libbeep.dylib" if platform.system() == "Darwin" else "libbeep.so")
 RELEASE = ROOT / "core" / "target" / "release"
+PROFILE = "release"
 
 results = []  # (group, name, status, detail)
 
@@ -103,7 +104,7 @@ def build(t):
     BUILD.mkdir(parents=True, exist_ok=True)
     steps = []
     if t["cargo"]:
-        steps.append(("rust", [t["cargo"], "build", "--release"], ROOT / "core"))
+        steps.append(("rust", [t["cargo"], "build", "--locked", *(["--release"] if PROFILE == "release" else [])], ROOT / "core"))
     if t["javac"]:
         srcs = [str(p) for p in (ROOT / "native/java/src").rglob("*.java")]
         steps.append(("java", [t["javac"], "--release", "11", "-d", str(BUILD / "java"), *srcs], None))
@@ -135,11 +136,19 @@ def build(t):
 
 
 def main():
+    global PROFILE, RELEASE
+    # Every integration endpoint is local. System HTTP proxies must not intercept
+    # language-client requests to our temporary loopback ports.
+    bypass = "localhost,127.0.0.1," + os.environ.get("NO_PROXY", "")
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = bypass
     # Tool output may hold characters the console code page (e.g. GBK) cannot encode.
     sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", action="store_true")
+    ap.add_argument("--profile", choices=("debug", "release"), default="release")
     args = ap.parse_args()
+    PROFILE = args.profile
+    RELEASE = ROOT / "core" / "target" / PROFILE
     t = {k: tool(k) for k in ("cargo", "go", "php", "ruby", "zig", "java", "javac", "dotnet", "node", "gcc", "perl", "tclsh", "pwsh", "curl", "openssl")}
     t["gxx"] = tool("gxx", "g++")
     t["gfortran"] = tool("gfortran")
@@ -191,7 +200,7 @@ def main():
 
         # ---- Rust core: unit + integration tests (frames, flow control, RPC, TLS) ------------
         if t["cargo"]:
-            rc, out = run([t["cargo"], "test", "--release", "-p", "minta-beep"], cwd=ROOT / "core", timeout=1200)
+            rc, out = run([t["cargo"], "test", "--locked", *(["--release"] if PROFILE == "release" else []), "-p", "minta-beep"], cwd=ROOT / "core", timeout=1200)
             record("native", "Rust core (cargo test)", rc, out, "test result: ok")
         else:
             skip("native", "Rust core", "cargo not found")
@@ -471,6 +480,13 @@ def main():
     finally:
         for p in procs:
             p.stop()
+
+    standard = RELEASE / f"mintagw{EXE}"
+    if standard.exists():
+        rc, out = run([py, str(ROOT / "tests/standard_test.py")], env={"MINTAGW": str(standard)}, timeout=600)
+        record("standard", "HTTP/JSON + gRPC gateway", rc, out)
+    else:
+        skip("standard", "HTTP/JSON + gRPC gateway", "mintagw not built")
 
     passed = sum(1 for r in results if r[2] == "PASS")
     failed = [r for r in results if r[2] == "FAIL"]

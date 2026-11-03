@@ -1,0 +1,4 @@
+# Optional application-protocol interoperability checks in standard_test.py.
+grpcio>=1.68,<2
+websockets>=14,<16
+cryptography>=44,<50

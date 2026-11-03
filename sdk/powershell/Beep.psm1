@@ -8,7 +8,14 @@
 #   Add-Type -Path Minta.Beep.dll; $c = [Minta.Beep.RpcClient]::new('127.0.0.1', 10288, $null)
 
 $script:Gateway = if ($env:BEEP_GATEWAY) { $env:BEEP_GATEWAY } else { 'http://127.0.0.1:8080' }
-$script:Http = [System.Net.Http.HttpClient]::new()
+function New-GatewayHttpClient([string]$Url) {
+    $handler = [System.Net.Http.HttpClientHandler]::new()
+    # PowerShell hosts can install a global proxy which ignores NO_PROXY.
+    # Local gateways must stay local; remote gateways retain normal proxy support.
+    if (([uri]$Url).IsLoopback) { $handler.UseProxy = $false }
+    [System.Net.Http.HttpClient]::new($handler)
+}
+$script:Http = New-GatewayHttpClient $script:Gateway
 
 class BeepError : System.Exception {
     [int]$Code
@@ -16,7 +23,13 @@ class BeepError : System.Exception {
     BeepError([int]$code, [int]$status, [string]$message) : base($message) { $this.Code = $code; $this.HttpStatus = $status }
 }
 
-function Set-BeepGateway([Parameter(Mandatory)][string]$Url) { $script:Gateway = $Url.TrimEnd('/') }
+function Set-BeepGateway([Parameter(Mandatory)][string]$Url) {
+    $next = $Url.TrimEnd('/')
+    $http = New-GatewayHttpClient $next
+    $script:Http.Dispose()
+    $script:Gateway = $next
+    $script:Http = $http
+}
 
 function Invoke-Beep {
     [CmdletBinding()]

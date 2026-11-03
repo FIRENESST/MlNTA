@@ -209,6 +209,58 @@ async fn timeouts_and_abandoned_streams_recycle_channels() {
     assert!(client.status()[0] <= 2);
 }
 
+// A peer can ignore Rpc-Timeout or leave an ANS stream open indefinitely.
+// Neither case may hold the client's last pool permit forever.
+struct StalledPeer;
+#[async_trait]
+impl ProfileHandler for StalledPeer {
+    async fn on_message(&self, session: &Session, msg: IncomingMessage, reply: Responder) {
+        let request = msg.collect(session.config().max_message_size).await.unwrap();
+        let request = RpcRequest::from_entity(mime::Entity::parse(request)).unwrap();
+        if request.target == "/hang" { std::future::pending::<()>().await; }
+        if request.target == "/forever" {
+            reply.ans(mime::Entity::new(vec![("Rpc-Status".into(), "200".into())], "first").to_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        }
+        reply.rpy(mime::Entity::new(vec![], "ok").to_bytes()).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stalled_responses_release_pool_capacity() {
+    let listener = Listener::bind("127.0.0.1:0", Config::default(), Profiles::new().with(RPC_PROFILE, StalledPeer)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(listener.serve());
+    let client = RpcClient::new(address.to_string(), ClientOptions {
+        max_channels: 1, request_timeout: Some(Duration::from_millis(50)), drain_timeout: Duration::from_millis(50), ..Default::default()
+    });
+    assert!(matches!(client.call(RpcRequest::new("GET", "/hang")).await, Err(RpcError::Timeout)));
+    let ok = tokio::time::timeout(Duration::from_secs(2), client.call(RpcRequest::new("GET", "/ok"))).await.unwrap().unwrap();
+    assert_eq!(&ok.body[..], b"ok");
+    let (_, body) = client.call_streaming(RpcRequest::new("GET", "/forever")).await.unwrap();
+    drop(body);
+    let ok = tokio::time::timeout(Duration::from_secs(2), client.call(RpcRequest::new("GET", "/ok"))).await.unwrap().unwrap();
+    assert_eq!(&ok.body[..], b"ok");
+    client.close().await;
+}
+
+#[tokio::test]
+async fn rpc1_fallback_obeys_per_call_buffer_limit() {
+    let handler = rpc_handler();
+    let listener = Listener::bind("127.0.0.1:0", Config::default(), Profiles::new().with(RPC_PROFILE, RpcProfile::new(handler))).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(listener.serve());
+    let client = RpcClient::new(address.to_string(), ClientOptions::default());
+    let (mut writer, pending) = client.call_duplex_limited(RpcRequest::new("POST", "/echo"), Some(Duration::from_secs(1)), 8).await.unwrap();
+    assert!(!writer.is_streaming());
+    writer.send(Bytes::from_static(b"12345678")).await.unwrap();
+    assert!(matches!(writer.send(Bytes::from_static(b"9")).await, Err(RpcError::Transport(Error::TooLarge(8)))));
+    assert!(matches!(pending.response().await, Err(RpcError::Transport(Error::TooLarge(8)))));
+    drop(writer);
+    assert_eq!(&client.call(RpcRequest::new("POST", "/ok").body("ok")).await.unwrap().body[..], b"ok");
+    client.close().await;
+}
+
 /// Speak raw RFC 3080 frames at our listener to pin down the exact wire behaviour.
 #[tokio::test]
 async fn wire_level_conformance() {

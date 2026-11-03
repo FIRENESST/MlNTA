@@ -1,0 +1,46 @@
+name: Gateway and compatibility tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      NO_PROXY: localhost,127.0.0.1
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/go/go.mod
+          cache: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install test dependencies
+        run: python -m pip install -r tests/requirements.txt
+      - name: Compile and test the Rust workspace
+        run: cargo test --manifest-path core/Cargo.toml --workspace --locked
+      - name: Build gateways and bindings
+        run: cargo build --manifest-path core/Cargo.toml --workspace --locked
+      - name: Check standard HTTP clients and real gRPC, WebSocket, TLS
+        run: python tests/standard_test.py --strict
+      - name: Compile the native Go module from a clean checkout
+        working-directory: native/go
+        run: go build ./...

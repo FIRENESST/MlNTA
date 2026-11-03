@@ -1,0 +1,38 @@
+syntax = "proto3";
+package minta.bridge.v1;
+
+// Only gateways need this protocol. Applications use ordinary HTTP or /v1/call JSON.
+service Bridge {
+  rpc Exchange(stream Packet) returns (stream Packet);
+  rpc Check(Empty) returns (Empty);
+}
+
+message Empty {}
+message Header { string name = 1; bytes value = 2; }
+message Headers { repeated Header fields = 1; }
+message RequestHead {
+  string method = 1;
+  string target = 2;
+  string authority = 3;
+  repeated Header headers = 4;
+  string upgrade = 5;
+  uint64 timeout_ms = 6;
+}
+message ResponseHead {
+  uint32 status = 1;
+  repeated Header headers = 2;
+  string upgrade = 3;
+  bool no_body = 4;
+}
+// Exactly one head, zero or more data packets, optional trailers, then End.
+// EOF without End is an aborted body, never a successful short upload/download.
+// Data packets are at most 64 KiB. Total body limits are enforced independently.
+message Packet {
+  oneof payload {
+    RequestHead request = 1;
+    ResponseHead response = 2;
+    bytes data = 3;
+    Headers trailers = 4;
+    Empty end = 5;
+  }
+}

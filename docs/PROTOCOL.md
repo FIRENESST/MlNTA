@@ -1,6 +1,6 @@
 # MINTA BEEP Bridge — 协议规范
 
-本文是所有语言实现（Rust 核心、网关、C ABI、各语言原生库、SDK）共同遵守的唯一规范。
+本文是 BEEP 兼容实现（Rust BEEP 核心、beepgw、C ABI、各语言原生 BEEP 库及旧 SDK）的规范。推荐的新入口 mintagw 使用标准 HTTP/JSON 与 gRPC，见 [HTTP_GATEWAY.md](HTTP_GATEWAY.md)、[OpenAPI](HTTP_API.openapi.json) 和 [bridge.proto](../core/bridge/proto/bridge.proto)。
 分三层：
 
 1. **BEEP 传输层** —— RFC 3080（BEEP Core）+ RFC 3081（BEEP over TCP）的实现子集与约定

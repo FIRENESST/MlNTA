@@ -1,0 +1,42 @@
+[package]
+name = "minta-gateway"
+description = "Language-independent HTTP/JSON gateway with a streaming gRPC transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version = "1.88"
+
+[[bin]]
+name = "mintagw"
+path = "src/main.rs"
+
+[dependencies]
+bytes.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
+tonic-prost = "0.14"
+prost = "0.14"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+toml = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+tracing.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+webpki-roots.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+prost-build = "0.14"
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3"

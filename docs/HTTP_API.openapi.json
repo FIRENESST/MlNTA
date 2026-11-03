@@ -1,0 +1,62 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "MINTA HTTP/JSON Gateway", "version": "0.1.0", "description": "Any language can use HTTP. Only gateways use the internal gRPC protocol. Body and deadline limits are deployment settings."},
+  "paths": {
+    "/v1/call": {
+      "post": {
+        "operationId": "call",
+        "summary": "Make a buffered HTTP request through the gateway",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Call"}}}},
+        "responses": {
+          "200": {"description": "Completed application response; inspect status for the backend HTTP status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Reply"}}}},
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "413": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"},
+          "502": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"},
+          "504": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/healthz": {"get": {"summary": "Process liveness", "responses": {"200": {"description": "Gateway is running"}}}},
+    "/readyz": {"get": {"summary": "Check connectivity and credentials for configured gRPC peers (does not probe application health)", "responses": {"200": {"description": "Peers reachable"}, "503": {"description": "Peer unavailable"}}}}
+  },
+  "components": {
+    "schemas": {
+      "HeaderPairs": {"type": "array", "items": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2}},
+      "Call": {
+        "type": "object", "additionalProperties": false, "required": ["target"],
+        "properties": {
+          "method": {"type": "string", "default": "GET"},
+          "target": {"type": "string", "pattern": "^/(?!/)", "description": "Origin-form path and query; URLs and arbitrary destination hosts are not accepted"},
+          "headers": {"oneOf": [{"type": "object", "additionalProperties": {"type": "string"}}, {"$ref": "#/components/schemas/HeaderPairs"}]},
+          "body": {"type": "string", "description": "Raw UTF-8 request bytes; mutually exclusive with body_base64 and json"},
+          "body_base64": {"type": "string", "contentEncoding": "base64", "description": "Binary request bytes encoded as standard base64"},
+          "json": {"description": "Any JSON value, including null; encoded as application/json unless a Content-Type was supplied"},
+          "upstream": {"type": "string", "description": "Optional configured upstream name"},
+          "timeout_ms": {"type": "integer", "minimum": 1, "description": "Total call deadline, capped by the listener timeout"}
+        },
+        "allOf": [
+          {"not": {"required": ["body", "body_base64"]}},
+          {"not": {"required": ["body", "json"]}},
+          {"not": {"required": ["body_base64", "json"]}}
+        ],
+        "example": {"method": "POST", "target": "/echo", "json": {"hello": "world"}, "timeout_ms": 5000}
+      },
+      "Reply": {
+        "type": "object", "required": ["status", "headers", "trailers"],
+        "properties": {
+          "status": {"type": "integer", "minimum": 100, "maximum": 599},
+          "headers": {"$ref": "#/components/schemas/HeaderPairs"},
+          "trailers": {"$ref": "#/components/schemas/HeaderPairs"},
+          "body": {"type": "string", "description": "Present for a UTF-8 response"},
+          "body_base64": {"type": "string", "contentEncoding": "base64", "description": "Present for a binary response"}
+        },
+        "oneOf": [{"required": ["body"]}, {"required": ["body_base64"]}]
+      },
+      "Error": {"type": "object", "required": ["error"], "properties": {"error": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}}}
+    },
+    "responses": {"Error": {"description": "Gateway failure (distinct from a completed backend HTTP response)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}}
+  }
+}

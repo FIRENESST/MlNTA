@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	beep "github.com/minta/beep-bridge/native/go"
+	beep "github.com/FIRENESST/MlNTA/native/go"
 )
 
 func handler(ctx context.Context, req *beep.Request) (*beep.ServerReply, error) {

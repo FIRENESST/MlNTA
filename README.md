@@ -1,4 +1,66 @@
-# MINTA BEEP Bridge
+# MINTA HTTP/JSON Gateway
+
+**应用统一使用标准 HTTP/JSON，网关之间使用流式 gRPC。任何能发 HTTP 的语言都能接入，无需实现专用协议、安装 MINTA SDK 或生成 Protobuf 客户端。**
+
+```text
+任意语言客户端 → HTTP/JSON → mintagw proxy
+                                ⇅ gRPC / HTTP/2，可选 TLS + Bearer
+任意语言后端 ← HTTP/HTTPS/h2c ← mintagw expose
+```
+
+## 推荐入口
+
+需要 Rust 1.88+，Protobuf 编译器随构建依赖提供，无需另装 protoc。
+
+```sh
+cd core
+cargo build --release --locked
+# 后端侧：现有 HTTP 服务无需修改
+mintagw expose --listen 127.0.0.1:10290 --backend http://127.0.0.1:3000
+# 应用侧
+mintagw proxy --listen 127.0.0.1:8080 --upstream http://127.0.0.1:10290
+```
+
+原来的 HTTP 请求直接发往网关同一路径。也可以使用统一 JSON 接口：
+
+```sh
+curl -H 'Content-Type: application/json' \
+  --data '{"method":"POST","target":"/echo","json":{"hello":"world"}}' \
+  http://127.0.0.1:8080/v1/call
+```
+
+应答示例（外层 HTTP 200 表示调用完成，`status` 是后端状态，包含后端 404/500）：
+
+```json
+{"status":200,"headers":[["content-type","application/json"]],"trailers":[],"body":"{\"hello\":\"world\"}"}
+```
+
+请求体三选一：`json`（包含 null）、`body`（UTF-8 文本）、`body_base64`（二进制）。应答使用 `body` 或 `body_base64`，头/trailer 用数组保留同名字段。网关失败返回标准 HTTP 错误状态与 `{"error":{"code":"...","message":"..."}}`。
+
+- [HTTP API 与运行说明](docs/HTTP_GATEWAY.md) · [OpenAPI 3.1](docs/HTTP_API.openapi.json)（运行时 `/openapi.json`）
+- [网关间 Protobuf 契约](core/bridge/proto/bridge.proto) · [TOML 配置](core/bridge/mintagw.example.toml)
+- [无 MINTA 依赖的客户端](examples/http/)：Python、Node.js、Java、Go、C#、PowerShell；其它语言使用自身 HTTP 库或 curl，语言覆盖不依赖原生 gRPC 库
+
+普通 HTTP 路径支持流式上传/响应、trailer、gRPC 四种调用模式和 HTTP/1.1 WebSocket Upgrade。`/v1/call` 是有大小上限的缓冲 JSON API。请求体限制在两侧各自生效，默认 64 MiB；大上传需调高两侧 `--max-body-bytes`。JSON 响应另有 `--max-response-bytes` 限制。
+
+`--timeout-ms` 默认 30000，是调用及其流的总时长；长连接应调高两侧配置。断开连接/丢弃应答会取消相应 gRPC 流，释放并发额度并终止后端 I/O。HTTP 入口支持 HTTP/1.1、h2c，入口 HTTPS 可由标准反向代理终结；内部 gRPC 支持 TLS/证书验证和可选 Bearer 认证。
+
+```sh
+cargo test --manifest-path core/Cargo.toml --workspace --locked
+cargo build --manifest-path core/Cargo.toml --workspace --locked
+python -m pip install -r tests/requirements.txt
+python tests/standard_test.py --strict
+# 历史 BEEP/FFI/SDK 兼容矩阵，缺失工具链明确标为 SKIP
+python tests/run_all.py --build
+```
+
+标准链路测试覆盖 HTTP/JSON、二进制/trailer、限额、超时和无限流取消、并发、路由、真实 gRPC/WebSocket、TLS/认证及可用语言的标准 HTTP 客户端。历史的 71 项结果对应下方 BEEP 版本，不代表新链路的实测结果。
+
+---
+
+# BEEP 兼容接口
+
+以下 `beepgw`、`native/`、`bindings/` 和 `sdk/` 接口保留供现有应用使用；新集成优先使用上面的 HTTP/JSON 入口。
 
 把**几乎任何编程语言**的后端请求对接到 **RFC 3080/3081 BEEP** 传输层的适配器套件。
 
@@ -214,7 +276,8 @@ tests/           run_all.py（总测试）backend.py clients/ grpc_test.py ws_te
 ## 已知限制
 
 - **SASL** 只实现了 PLAIN（RFC 4616），没有 SASL 安全层；口令以明文传输，需配合 TLS。SCRAM、EXTERNAL（TLS 客户端证书）未实现。
-- **rpc:2**（流式请求、全双工、trailer、升级）由 Rust 核心、网关和 C ABI 客户端支持；Python/Node/Java/.NET/Go 原生库实现的是 rpc:1，与 rpc:2 对端自动回落互通，但它们自身不能发流式请求或做升级。
+- **rpc:2**（流式请求、全双工、trailer、升级）由 Rust 核心和 BEEP 网关完整提供。C ABI 客户端能协商 rpc:2，但导出 API 仍是缓冲请求/响应，不提供全双工接口。Python/Node/Java/.NET/Go 原生库实现的是 rpc:1，可以自动回落互通。新 HTTP/gRPC 网关不依赖这些原生库。
+- BEEP 客户端对超时/放弃的响应最多后台读取 `ClientOptions::drain_timeout`（默认 5 秒），仍不结束则中止该会话并重建。BEEP 无法单独取消繁忙通道，会影响同会话其它请求；新 gRPC 链路按流取消。
 - **TLS**：采用标准 TLS 调谐 profile，在会话开始时协商；监听端配置 TLS 后要求所有会话先走 TLS。
 - WebSocket 只支持 HTTP/1.1 `Upgrade`；HTTP/2 上的 WebSocket（RFC 8441 扩展 CONNECT）未桥接。gRPC 走明文 h2c 接网关（网关出向不做 TLS 终结）。
 - 上游只有 rpc:1 时，网关对流式请求体做缓冲（上限 `max_body_bytes`，默认 64 MiB）。

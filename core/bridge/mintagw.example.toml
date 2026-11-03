@@ -1,0 +1,28 @@
+# mintagw run -c mintagw.example.toml
+[[upstream]]
+name = "default"
+address = "http://127.0.0.1:10290"
+# Use https:// for a TLS peer. Optional private CA and authentication:
+# ca_file = "/etc/minta/ca.pem"
+# server_name = "bridge.internal"
+# token_env = "MINTA_INTERNAL_TOKEN"
+
+[[http]]
+listen = "127.0.0.1:8080"
+upstream = "default"
+max_body_bytes = 67108864
+max_response_bytes = 67108864   # buffered JSON replies only
+timeout_ms = 30000             # total call/stream deadline
+max_in_flight = 64
+# routes = [{ prefix = "/api/", upstream = "default", strip_prefix = true }]
+
+[[grpc]]
+listen = "127.0.0.1:10290"
+backend = "http://127.0.0.1:3000"  # also https://host/base or h2c://host:50051
+max_body_bytes = 67108864
+timeout_ms = 30000
+max_in_flight = 64
+# backend_ca_file = "/etc/minta/backend-ca.pem"
+# cert_file = "/etc/minta/server.pem"
+# key_file = "/etc/minta/server-key.pem"
+# token_env = "MINTA_INTERNAL_TOKEN"

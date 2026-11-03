@@ -210,7 +210,7 @@ async fn proxy(mut req: Request<Incoming>, st: &HttpState, peer: SocketAddr) -> 
         headers.push((H_UPGRADE.into(), p.clone()));
     }
     let rpc = RpcRequest { method, target, headers, body: Bytes::new() };
-    let (writer, pending) = match client.call_duplex(rpc, timeout.or(client.request_timeout())).await {
+    let (writer, pending) = match client.call_duplex_limited(rpc, timeout.or(client.request_timeout()), st.cfg.max_body_bytes).await {
         Ok(r) => r,
         Err(e) => return rpc_error_response(&e),
     };

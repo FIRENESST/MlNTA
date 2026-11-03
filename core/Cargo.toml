@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["beep", "gateway", "ffi"]
+members = ["beep", "gateway", "ffi", "bridge"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://example.invalid/minta/beep-bridge"
+repository = "https://github.com/FIRENESST/MlNTA"
 rust-version = "1.80"
 
 [workspace.dependencies]

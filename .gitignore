@@ -10,9 +10,11 @@ __pycache__/
 *.pyc
 *.o
 *.mod
+!go.mod
 *.exe
 .zig-cache/
 zig-out/
 bindings/dart/.dart_tool/
 bindings/dart/pubspec.lock
 bindings/swift/.build/
+.venv/

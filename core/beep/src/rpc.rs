@@ -386,6 +386,9 @@ pub struct ClientOptions {
     pub connect_timeout: Duration,
     /// Deadline for receiving the response head; also sent as `Rpc-Timeout`.
     pub request_timeout: Option<Duration>,
+    /// Maximum time to drain an abandoned response before aborting its BEEP session.
+    /// BEEP cannot cancel a busy channel individually; gRPC streams do not have this restriction.
+    pub drain_timeout: Duration,
     /// Preferred profile offered when starting channels.
     pub profile: String,
     /// Offered after `profile`; the peer picks the first one it serves.
@@ -404,6 +407,7 @@ impl Default for ClientOptions {
             max_channels: 64,
             connect_timeout: Duration::from_secs(5),
             request_timeout: Some(Duration::from_secs(30)),
+            drain_timeout: Duration::from_secs(5),
             profile: RPC_PROFILE_V2.to_string(),
             fallback_profiles: vec![RPC_PROFILE.to_string()],
             sasl: None,
@@ -478,7 +482,11 @@ fn spawn_drain(dec: ReplyDecoder, lease: Arc<Lease>) {
     }
     if let Ok(rt) = tokio::runtime::Handle::try_current() {
         rt.spawn(async move {
-            while let Some(Ok(_)) = stream.next().await {}
+            let timeout = lease.client.upgrade().map(|c| c.opts.drain_timeout).unwrap_or(Duration::from_secs(5));
+            let drain = async { while let Some(Ok(_)) = stream.next().await {} };
+            if tokio::time::timeout(timeout, drain).await.is_err() {
+                lease.channel().session().abort();
+            }
             drop(lease);
         });
     }
@@ -789,7 +797,13 @@ impl RpcClient {
     /// With an rpc:2 peer the body is streamed and the reply may begin before it ends;
     /// with an rpc:1 peer it is buffered (up to `beep.max_message_size`) and sent on
     /// [`RequestWriter::finish`]. Upgrades (`Rpc-Upgrade`) need rpc:2.
-    pub async fn call_duplex(&self, mut req: RpcRequest, timeout: Option<Duration>) -> Result<(RequestWriter, PendingResponse), RpcError> {
+    pub async fn call_duplex(&self, req: RpcRequest, timeout: Option<Duration>) -> Result<(RequestWriter, PendingResponse), RpcError> {
+        self.call_duplex_limited(req, timeout, self.inner.opts.beep.max_message_size).await
+    }
+
+    /// Like `call_duplex`, with a per-call buffering limit for rpc:1 fallback.
+    /// This lets HTTP listeners sharing an upstream enforce their own body limits.
+    pub async fn call_duplex_limited(&self, mut req: RpcRequest, timeout: Option<Duration>, max_buffered: usize) -> Result<(RequestWriter, PendingResponse), RpcError> {
         Self::with_timeout_header(&mut req, timeout);
         let lease = Arc::new(self.acquire().await?);
         if lease.channel().profile() == RPC_PROFILE_V2 {
@@ -802,7 +816,7 @@ impl RpcClient {
             return Err(RpcError::Remote { code: code::PARAM_NOT_IMPLEMENTED, message: format!("peer does not serve {RPC_PROFILE_V2}, which upgrades need") });
         }
         let (tx, rx) = oneshot::channel();
-        let max = self.inner.opts.beep.max_message_size;
+        let max = max_buffered;
         req.body = Bytes::new();
         let writer = RequestWriter { kind: WriterKind::Buffer { req, buf: BytesMut::new(), max, reply: Some(tx) }, _lease: lease.clone() };
         Ok((writer, PendingResponse { kind: PendingKind::Waiting(rx), lease, timeout }))
