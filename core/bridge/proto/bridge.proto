@@ -16,6 +16,8 @@ message RequestHead {
   string authority = 3;
   repeated Header headers = 4;
   string upgrade = 5;
+  // How long the call may go without progress before the response head (0: peer
+  // default). Each gateway also applies its own idle and maximum-duration timers.
   uint64 timeout_ms = 6;
 }
 message ResponseHead {

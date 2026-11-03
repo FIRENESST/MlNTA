@@ -1,5 +1,7 @@
 # MINTA BEEP Bridge — 协议规范
 
+> **已弃用。** BEEP 路径只修缺陷和安全问题，计划在之后的主版本移除。新部署使用 mintagw，迁移见 [MIGRATION.md](MIGRATION.md)。
+
 本文是 BEEP 兼容实现（Rust BEEP 核心、beepgw、C ABI、各语言原生 BEEP 库及旧 SDK）的规范。推荐的新入口 mintagw 使用标准 HTTP/JSON 与 gRPC，见 [HTTP_GATEWAY.md](HTTP_GATEWAY.md)、[OpenAPI](HTTP_API.openapi.json) 和 [bridge.proto](../core/bridge/proto/bridge.proto)。
 分三层：
 

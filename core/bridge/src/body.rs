@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -6,7 +7,7 @@ use bytes::Bytes;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full};
 use tokio::sync::{mpsc, OwnedSemaphorePermit};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type FrameTx = mpsc::Sender<Result<Frame<Bytes>, BoxError>>;
@@ -45,7 +46,11 @@ impl Body {
         permit: Option<OwnedSemaphorePermit>,
     ) -> (FrameTx, Self) {
         let (tx, rx) = mpsc::channel(4);
-        let mut body = Self::new(Frames(rx));
+        let mut body = Self::new(Frames {
+            rx,
+            call: Box::pin(cancel.clone().cancelled_owned()),
+            failed: false,
+        });
         body.cancel = Some(cancel);
         body._permit = permit;
         (tx, body)
@@ -147,7 +152,22 @@ impl<B: HttpBody<Data = Bytes> + Unpin + Send + 'static> Drop for Lingering<B> {
     }
 }
 
-struct Frames(mpsc::Receiver<Result<Frame<Bytes>, BoxError>>);
+/// A channel body fails, instead of ending, when its call is cancelled first. Otherwise
+/// a cancelled upload or response would look complete to whoever reads it (e.g. Hyper
+/// would finish a chunked upload to the backend with its last chunk).
+struct Frames {
+    rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>,
+    call: Pin<Box<WaitForCancellationFutureOwned>>,
+    failed: bool,
+}
+
+impl Frames {
+    fn cancelled(&mut self) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        self.failed = true;
+        Poll::Ready(Some(Err("call cancelled before the body ended".into())))
+    }
+}
+
 impl HttpBody for Frames {
     type Data = Bytes;
     type Error = BoxError;
@@ -155,6 +175,13 @@ impl HttpBody for Frames {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
-        self.0.poll_recv(cx)
+        if self.failed {
+            return Poll::Ready(None);
+        }
+        match self.rx.poll_recv(cx) {
+            Poll::Ready(None) if self.call.as_mut().poll(cx).is_ready() => self.cancelled(),
+            Poll::Pending if self.call.as_mut().poll(cx).is_ready() => self.cancelled(),
+            polled => polled,
+        }
     }
 }

@@ -11,8 +11,9 @@ use http_body::Frame;
 use http_body_util::{BodyExt, Limited};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
+use hyper_util::server::graceful::GracefulShutdown;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -23,22 +24,30 @@ use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
 use crate::body::{Body, BoxError, Lingering};
+use crate::call::{Call, Timers};
 use crate::config::HttpListener;
-use crate::transport::{self, bounded, Client, CHUNK};
+use crate::transport::{self, Client, CHUNK};
 
 pub struct State {
     pub cfg: HttpListener,
     pub clients: HashMap<String, Client>,
     permits: Arc<Semaphore>,
+    /// Cancelled on SIGINT/SIGTERM: stop accepting, report not ready, drain.
+    shutdown: CancellationToken,
 }
 
 impl State {
-    pub fn new(cfg: HttpListener, clients: HashMap<String, Client>) -> Self {
+    pub fn new(
+        cfg: HttpListener,
+        clients: HashMap<String, Client>,
+        shutdown: CancellationToken,
+    ) -> Self {
         let permits = Arc::new(Semaphore::new(cfg.max_in_flight));
         Self {
             cfg,
             clients,
             permits,
+            shutdown,
         }
     }
 }
@@ -110,6 +119,7 @@ fn route<'a>(
         .ok_or_else(|| Status::invalid_argument(format!("unknown upstream {name:?}")))
 }
 
+/// `timeout` (the listener's, or shorter if the caller asked) also covers admission.
 async fn dispatch(
     st: &State,
     client: &Client,
@@ -117,19 +127,16 @@ async fn dispatch(
     timeout: Duration,
     max: usize,
 ) -> Result<Response<Body>, Status> {
-    let deadline = Instant::now() + timeout;
-    let permit = tokio::time::timeout_at(deadline, st.permits.clone().acquire_owned())
+    let started = Instant::now();
+    let permit = tokio::time::timeout(timeout, st.permits.clone().acquire_owned())
         .await
         .map_err(|_| Status::deadline_exceeded("gateway admission timed out"))?
         .map_err(|_| Status::unavailable("gateway stopped"))?;
-    client
-        .exchange(
-            request,
-            deadline.saturating_duration_since(Instant::now()),
-            max,
-            permit,
-        )
-        .await
+    let timers = Timers {
+        timeout: timeout.saturating_sub(started.elapsed()),
+        ..st.cfg.timers()
+    };
+    client.exchange(request, timers, max, permit).await
 }
 
 #[derive(Deserialize)]
@@ -379,10 +386,15 @@ async fn proxy(mut req: Request<Incoming>, st: &State) -> Result<Response<Body>,
         .await?;
         if response.status() == StatusCode::SWITCHING_PROTOCOLS {
             let (parts, mut body) = response.into_parts();
+            // The tunnel shares the call: it lives while bytes move (the call's idle
+            // timer sees both directions) and ends with the call.
+            let call = parts
+                .extensions
+                .get::<Call>()
+                .cloned()
+                .ok_or_else(|| Status::internal("upgrade without call state"))?;
             tokio::spawn(async move {
-                let deadline = Instant::now() + timeout;
-                let cancel = CancellationToken::new();
-                let Ok(Ok(io)) = bounded(&cancel, deadline, on_upgrade).await else {
+                let Ok(Ok(io)) = call.bounded(on_upgrade).await else {
                     return;
                 };
                 let (mut rd, mut wr) = tokio::io::split(TokioIo::new(io));
@@ -391,13 +403,12 @@ async fn proxy(mut req: Request<Incoming>, st: &State) -> Result<Response<Body>,
                     loop {
                         let n = tokio::select! {
                             _ = tx.closed() => return Ok::<_, BoxError>(()),
-                            n = tokio::time::timeout_at(deadline, rd.read(&mut buffer)) => n??,
+                            n = call.bounded(rd.read(&mut buffer)) => n??,
                         };
                         if n == 0 {
                             return Ok(());
                         }
-                        tokio::time::timeout_at(
-                            deadline,
+                        call.bounded(
                             tx.send(Ok(Frame::data(Bytes::copy_from_slice(&buffer[..n])))),
                         )
                         .await?
@@ -405,9 +416,9 @@ async fn proxy(mut req: Request<Incoming>, st: &State) -> Result<Response<Body>,
                     }
                 };
                 let down = async {
-                    while let Some(frame) = tokio::time::timeout_at(deadline, body.frame()).await? {
+                    while let Some(frame) = call.bounded(body.frame()).await? {
                         if let Ok(data) = frame?.into_data() {
-                            tokio::time::timeout_at(deadline, wr.write_all(&data)).await??;
+                            call.bounded(wr.write_all(&data)).await??;
                         }
                     }
                     wr.shutdown().await?;
@@ -441,6 +452,10 @@ async fn handle(
 ) -> Result<Response<Body>, Infallible> {
     let result = match req.uri().path() {
         "/healthz" => Ok(json_response(StatusCode::OK, json!({"status": "ok"}))),
+        "/readyz" | "/__beep/health" if st.shutdown.is_cancelled() => Ok(json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"status": "draining"}),
+        )),
         "/readyz" | "/__beep/health" => {
             let mut checks = tokio::task::JoinSet::new();
             for (name, client) in &st.clients {
@@ -479,34 +494,56 @@ async fn handle(
     Ok(result.unwrap_or_else(error))
 }
 
+/// Serves until the state's shutdown token fires, then stops accepting and waits for
+/// in-flight requests (the caller bounds the wait). Upgraded tunnels are not waited for.
 pub async fn serve(st: State) -> Result<(), BoxError> {
     let listener = TcpListener::bind(&st.cfg.listen).await?;
     tracing::info!("HTTP/JSON gateway listening on {}", listener.local_addr()?);
     let mut builder = auto::Builder::new(TokioExecutor::new());
+    // Hyper ignores its header read timeout without a timer, and a client could then
+    // hold a connection open forever by never finishing its request head.
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(Duration::from_millis(st.cfg.header_timeout_ms));
     // An h2c client multiplexes calls on one connection; see transport::connection_window.
     builder
         .http2()
+        .timer(TokioTimer::new())
         .max_concurrent_streams(st.cfg.max_in_flight.min(u32::MAX as usize) as u32)
         .initial_stream_window_size(transport::STREAM_WINDOW)
         .initial_connection_window_size(transport::connection_window(st.cfg.max_in_flight));
-    let builder = Arc::new(builder);
+    let shutdown = st.shutdown.clone();
     let state = Arc::new(st);
+    let graceful = GracefulShutdown::new();
     loop {
         let (tcp, peer) = tokio::select! {
-            r = listener.accept() => r?,
-            _ = tokio::signal::ctrl_c() => return Ok(()),
+            r = listener.accept() => match r {
+                Ok(r) => r,
+                Err(e) => {
+                    // E.g. out of file descriptors: keep serving existing connections.
+                    tracing::warn!("accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            },
+            _ = shutdown.cancelled() => break,
         };
         let _ = tcp.set_nodelay(true);
         let state = state.clone();
-        let builder = builder.clone();
+        let service = service_fn(move |req| handle(req, state.clone(), peer));
+        let conn = builder
+            .serve_connection_with_upgrades(TokioIo::new(tcp), service)
+            .into_owned();
+        let conn = graceful.watch(conn);
         tokio::spawn(async move {
-            let service = service_fn(move |req| handle(req, state.clone(), peer));
-            if let Err(e) = builder
-                .serve_connection_with_upgrades(TokioIo::new(tcp), service)
-                .await
-            {
+            if let Err(e) = conn.await {
                 tracing::debug!(%peer, "HTTP connection: {e}");
             }
         });
     }
+    drop(listener);
+    // Idle keep-alive connections close at once; busy ones after their response.
+    graceful.shutdown().await;
+    Ok(())
 }

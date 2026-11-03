@@ -6,7 +6,9 @@
 
 `examples/http/` 给出 Python、Node、Java、Go、C#、PowerShell 的无 MINTA 依赖客户端。`tests/standard_test.py` 报告可用工具链的实测结果与跳过项。接口见 [HTTP_GATEWAY.md](HTTP_GATEWAY.md) 与 [OpenAPI](HTTP_API.openapi.json)。
 
-## 历史 BEEP 兼容路径
+## 历史 BEEP 兼容路径（已弃用）
+
+> 这些路径只修缺陷和安全问题，计划在之后的主版本移除；迁移见 [MIGRATION.md](MIGRATION.md)。
 
 下方平台通过标记来自原 BEEP 版本的测试记录，不代表新 gRPC 网关的测试结果；这些旧路径继续保留。
 

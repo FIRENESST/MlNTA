@@ -2,7 +2,9 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-#[derive(Clone, Deserialize, Default)]
+use crate::call::Timers;
+
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -11,6 +13,9 @@ pub struct Config {
     pub http: Vec<HttpListener>,
     #[serde(default)]
     pub grpc: Vec<GrpcListener>,
+    /// On SIGINT/SIGTERM, in-flight calls get this long to finish.
+    #[serde(default = "shutdown_grace_ms")]
+    pub shutdown_grace_ms: u64,
 }
 
 #[derive(Clone, Deserialize)]
@@ -49,6 +54,12 @@ pub struct HttpListener {
     pub max_response_bytes: usize,
     #[serde(default = "timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
+    #[serde(default)]
+    pub max_duration_ms: u64,
+    #[serde(default = "header_timeout_ms")]
+    pub header_timeout_ms: u64,
     #[serde(default = "concurrency")]
     pub max_in_flight: usize,
 }
@@ -70,6 +81,10 @@ pub struct GrpcListener {
     pub max_body_bytes: usize,
     #[serde(default = "timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
+    #[serde(default)]
+    pub max_duration_ms: u64,
     #[serde(default = "concurrency")]
     pub max_in_flight: usize,
 }
@@ -77,12 +92,46 @@ pub struct GrpcListener {
 pub fn body_limit() -> usize {
     64 << 20
 }
-/// Total deadline of a call and its streams, WebSocket tunnels included.
+/// How long a call may go without progress before its response head arrives.
 pub fn timeout_ms() -> u64 {
     60_000
 }
+/// After the response head: how long a stream or tunnel may move no data at all.
+pub fn idle_timeout_ms() -> u64 {
+    300_000
+}
+/// Time allowed for a client to send a complete HTTP/1.1 request head.
+pub fn header_timeout_ms() -> u64 {
+    30_000
+}
+pub fn shutdown_grace_ms() -> u64 {
+    20_000
+}
 pub fn concurrency() -> usize {
     64
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            upstream: vec![],
+            http: vec![],
+            grpc: vec![],
+            shutdown_grace_ms: shutdown_grace_ms(),
+        }
+    }
+}
+
+impl HttpListener {
+    pub fn timers(&self) -> Timers {
+        Timers::from_ms(self.timeout_ms, self.idle_timeout_ms, self.max_duration_ms)
+    }
+}
+
+impl GrpcListener {
+    pub fn timers(&self) -> Timers {
+        Timers::from_ms(self.timeout_ms, self.idle_timeout_ms, self.max_duration_ms)
+    }
 }
 
 impl Config {
@@ -124,10 +173,15 @@ impl Config {
             }
             if h.max_in_flight == 0
                 || h.timeout_ms == 0
+                || h.idle_timeout_ms == 0
+                || h.header_timeout_ms == 0
                 || h.max_body_bytes == 0
                 || h.max_response_bytes == 0
             {
-                return Err("HTTP limits and timeout must be positive".into());
+                return Err(
+                    "HTTP limits and timeouts must be positive (max_duration_ms 0 means no cap)"
+                        .into(),
+                );
             }
             if h.routes.iter().any(|r| !r.prefix.starts_with('/')) {
                 return Err("route prefixes must start with /".into());
@@ -137,8 +191,15 @@ impl Config {
             if g.cert_file.is_some() != g.key_file.is_some() {
                 return Err("gRPC TLS needs both cert_file and key_file".into());
             }
-            if g.max_in_flight == 0 || g.timeout_ms == 0 || g.max_body_bytes == 0 {
-                return Err("gRPC limits and timeout must be positive".into());
+            if g.max_in_flight == 0
+                || g.timeout_ms == 0
+                || g.idle_timeout_ms == 0
+                || g.max_body_bytes == 0
+            {
+                return Err(
+                    "gRPC limits and timeouts must be positive (max_duration_ms 0 means no cap)"
+                        .into(),
+                );
             }
         }
         if self.http.is_empty() && self.grpc.is_empty() {

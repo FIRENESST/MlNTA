@@ -1,4 +1,6 @@
 # mintagw run -c mintagw.example.toml
+shutdown_grace_ms = 20000       # on SIGINT/SIGTERM, in-flight calls get this long
+
 [[upstream]]
 name = "default"
 address = "http://127.0.0.1:10290"
@@ -12,7 +14,10 @@ listen = "127.0.0.1:8080"
 upstream = "default"
 max_body_bytes = 67108864
 max_response_bytes = 67108864   # buffered JSON replies only
-timeout_ms = 60000             # total call/stream deadline (default)
+timeout_ms = 60000             # no progress before the response head (default)
+idle_timeout_ms = 300000       # no data either way once streaming (default)
+max_duration_ms = 0            # hard cap per call; 0 = none (default)
+header_timeout_ms = 30000      # complete HTTP/1.1 request head within this (default)
 max_in_flight = 64
 # routes = [{ prefix = "/api/", upstream = "default", strip_prefix = true }]
 
@@ -21,6 +26,8 @@ listen = "127.0.0.1:10290"
 backend = "http://127.0.0.1:3000"  # also https://host/base or h2c://host:50051
 max_body_bytes = 67108864
 timeout_ms = 60000
+idle_timeout_ms = 300000
+max_duration_ms = 0
 max_in_flight = 64
 # backend_ca_file = "/etc/minta/backend-ca.pem"
 # cert_file = "/etc/minta/server.pem"

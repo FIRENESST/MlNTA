@@ -22,7 +22,7 @@ use minta_beep::rpc::{rpc_profiles, ClientOptions, RpcClient, RpcRequest};
 use minta_beep::{Listener, Profiles};
 
 #[derive(Parser)]
-#[command(name = "beepgw", version, about = "MINTA BEEP bridge: HTTP / JSON-lines ⇄ RFC 3080 BEEP")]
+#[command(name = "beepgw", version, about = "MINTA BEEP bridge: HTTP / JSON-lines ⇄ RFC 3080 BEEP (deprecated: use mintagw)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -183,6 +183,13 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    // Only the long-running services warn; `call` and `echo` output is read by scripts.
+    if matches!(cli.cmd, Cmd::Run { .. } | Cmd::Proxy { .. } | Cmd::Expose { .. }) {
+        tracing::warn!(
+            "beepgw and the BEEP adapters are deprecated: fixes only, removal in a future major \
+             version. Use mintagw for new deployments; see docs/MIGRATION.md"
+        );
+    }
     let result = match cli.cmd {
         Cmd::Run { config } => match Config::load(&config) {
             Ok(cfg) => run(cfg).await,

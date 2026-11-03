@@ -35,7 +35,7 @@
           "body_base64": {"type": "string", "contentEncoding": "base64", "description": "Binary request bytes encoded as standard base64"},
           "json": {"description": "Any JSON value, including null; encoded as application/json unless a Content-Type was supplied"},
           "upstream": {"type": "string", "description": "Optional configured upstream name"},
-          "timeout_ms": {"type": "integer", "minimum": 1, "description": "Total call deadline, capped by the listener timeout"}
+          "timeout_ms": {"type": "integer", "minimum": 1, "description": "Total deadline of this buffered call, capped by the listener timeout_ms"}
         },
         "allOf": [
           {"not": {"required": ["body", "body_base64"]}},

@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -13,7 +12,6 @@ use hyper_util::client::legacy::{connect::HttpConnector, Client as HttpClient};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
-use tokio::time::Instant;
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{
@@ -22,6 +20,7 @@ use tonic::transport::{
 use tonic::{Code, Status, Streaming};
 
 use crate::body::{Body, FrameTx};
+use crate::call::{Call, Timers};
 use crate::config::{self, GrpcListener, Upstream};
 use crate::wire::{
     self,
@@ -69,18 +68,6 @@ fn rpc_status(status: Status) -> Status {
         Status::deadline_exceeded("request deadline exceeded")
     } else {
         status
-    }
-}
-
-pub async fn bounded<T>(
-    cancel: &CancellationToken,
-    deadline: Instant,
-    future: impl Future<Output = T>,
-) -> Result<T, Status> {
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => Err(Status::cancelled("call cancelled")),
-        r = tokio::time::timeout_at(deadline, future) => r.map_err(|_| Status::deadline_exceeded("request deadline exceeded")),
     }
 }
 
@@ -162,13 +149,8 @@ fn decode_headers(headers: Vec<wire::Header>) -> Result<HeaderMap, Status> {
     Ok(out)
 }
 
-async fn send(
-    tx: &mpsc::Sender<Packet>,
-    payload: Payload,
-    cancel: &CancellationToken,
-    deadline: Instant,
-) -> Result<(), Status> {
-    bounded(cancel, deadline, tx.send(packet(payload)))
+async fn send(tx: &mpsc::Sender<Packet>, payload: Payload, call: &Call) -> Result<(), Status> {
+    call.bounded(tx.send(packet(payload)))
         .await?
         .map_err(|_| Status::cancelled("request receiver closed"))
 }
@@ -176,13 +158,12 @@ async fn send(
 async fn encode_body(
     mut body: Body,
     tx: mpsc::Sender<Packet>,
-    cancel: CancellationToken,
-    deadline: Instant,
+    call: Call,
     max: usize,
 ) -> Result<(), Status> {
     let mut total = 0usize;
     let mut trailers_seen = false;
-    while let Some(frame) = bounded(&cancel, deadline, body.frame()).await? {
+    while let Some(frame) = call.bounded(body.frame()).await? {
         let frame = frame.map_err(|e| Status::cancelled(format!("reading HTTP body: {e}")))?;
         match frame.into_data() {
             Ok(data) => {
@@ -196,13 +177,8 @@ async fn encode_body(
                         Status::resource_exhausted(format!("request body exceeds {max} bytes"))
                     })?;
                 for chunk in data.chunks(CHUNK) {
-                    send(
-                        &tx,
-                        Payload::Data(Bytes::copy_from_slice(chunk)),
-                        &cancel,
-                        deadline,
-                    )
-                    .await?;
+                    send(&tx, Payload::Data(Bytes::copy_from_slice(chunk)), &call).await?;
+                    call.touch();
                 }
             }
             Err(frame) => {
@@ -216,28 +192,27 @@ async fn encode_body(
                         Payload::Trailers(wire::Headers {
                             fields: encode_headers(&clean_headers(&headers, false)),
                         }),
-                        &cancel,
-                        deadline,
+                        &call,
                     )
                     .await?;
                 }
             }
         }
     }
-    send(&tx, Payload::End(Empty {}), &cancel, deadline).await
+    send(&tx, Payload::End(Empty {}), &call).await
 }
 
 async fn decode_body(
     mut stream: Streaming<Packet>,
     tx: FrameTx,
-    cancel: CancellationToken,
-    deadline: Instant,
+    call: &Call,
     max: usize,
 ) -> Result<(), Status> {
     let mut total = 0usize;
     let mut trailers_seen = false;
     loop {
-        let msg = bounded(&cancel, deadline, stream.message())
+        let msg = call
+            .bounded(stream.message())
             .await?
             .map_err(rpc_status)?
             .ok_or_else(|| Status::cancelled("body aborted before End"))?;
@@ -252,6 +227,7 @@ async fn decode_body(
                     .ok_or_else(|| {
                         Status::resource_exhausted(format!("body exceeds {max} bytes"))
                     })?;
+                call.touch();
                 Frame::data(data)
             }
             Some(Payload::Trailers(h)) if !trailers_seen => {
@@ -259,17 +235,14 @@ async fn decode_body(
                 Frame::trailers(clean_headers(&decode_headers(h.fields)?, false))
             }
             Some(Payload::End(_)) => {
-                if bounded(&cancel, deadline, stream.message())
-                    .await??
-                    .is_some()
-                {
+                if call.bounded(stream.message()).await??.is_some() {
                     return Err(Status::invalid_argument("packets after End"));
                 }
                 return Ok(());
             }
             _ => return Err(Status::invalid_argument("invalid body packet order")),
         };
-        bounded(&cancel, deadline, tx.send(Ok(frame)))
+        call.bounded(tx.send(Ok(frame)))
             .await?
             .map_err(|_| Status::cancelled("HTTP body receiver closed"))?;
     }
@@ -278,16 +251,16 @@ async fn decode_body(
 fn spawn_decode(
     stream: Streaming<Packet>,
     tx: FrameTx,
-    cancel: CancellationToken,
-    deadline: Instant,
+    call: Call,
     max: usize,
 ) -> watch::Receiver<Option<Status>> {
     let (failure, rx) = watch::channel(None);
     tokio::spawn(async move {
-        if let Err(e) = decode_body(stream, tx.clone(), cancel.clone(), deadline, max).await {
+        if let Err(e) = decode_body(stream, tx.clone(), &call, max).await {
             let _ = failure.send(Some(e.clone()));
             // Closing/cancelling a peer must wake a blocked downstream HTTP reader.
-            let _ = bounded(&cancel, deadline, tx.send(Err(Box::new(e)))).await;
+            // (A cancelled call fails the channel body by itself.)
+            let _ = call.bounded(tx.send(Err(Box::new(e)))).await;
         }
     });
     rx
@@ -346,15 +319,17 @@ impl Client {
         Ok(())
     }
 
+    /// Forwards one HTTP call. The response carries the call's [`Call`] handle as an
+    /// extension, so an upgraded tunnel can share its timers and cancellation.
     pub async fn exchange(
         &self,
         req: Request<Body>,
-        timeout: Duration,
+        timers: Timers,
         max: usize,
         permit: OwnedSemaphorePermit,
     ) -> Result<Response<Body>, Status> {
-        let deadline = Instant::now() + timeout;
         let cancel = CancellationToken::new();
+        let call = Call::start(cancel.clone(), timers);
         // This body also cancels on an error or a dropped handler before response headers arrive.
         let (response_tx, response_body) = Body::channel(cancel.clone(), Some(permit));
         let (parts, request_body) = req.into_parts();
@@ -376,28 +351,27 @@ impl Client {
             authority,
             headers: encode_headers(&clean_headers(&parts.headers, false)),
             upgrade: upgrade(&parts.headers).unwrap_or_default(),
-            timeout_ms: timeout.as_millis().min(u64::MAX as u128) as u64,
+            timeout_ms: timers.timeout.as_millis().min(u64::MAX as u128) as u64,
         };
         let (tx, rx) = mpsc::channel(4);
-        send(&tx, Payload::Request(head), &cancel, deadline).await?;
+        send(&tx, Payload::Request(head), &call).await?;
         let (failure_tx, mut failure) = watch::channel(None::<Status>);
-        let upload_cancel = cancel.clone();
+        let upload = call.clone();
         tokio::spawn(async move {
             let closed = tx.clone();
-            if let Err(e) =
-                encode_body(request_body, tx, upload_cancel.clone(), deadline, max).await
-            {
+            if let Err(e) = encode_body(request_body, tx, upload.clone(), max).await {
                 // A closed request stream means the peer already finished (or failed) the
                 // call, e.g. an early reply; the response carries the outcome and must not
                 // be cancelled. Dropping the body lets the front end drain the rest.
                 if !closed.is_closed() {
                     let _ = failure_tx.send(Some(e));
-                    upload_cancel.cancel();
+                    upload.cancel();
                 }
             }
         });
+        // No grpc-timeout: it would bound the whole upload. RequestHead.timeout_ms and
+        // the timers of both gateways apply instead.
         let mut rpc = tonic::Request::new(ReceiverStream::new(rx));
-        rpc.set_timeout(timeout);
         if let Some(token) = &self.token {
             rpc.metadata_mut().insert("authorization", token.clone());
         }
@@ -420,10 +394,11 @@ impl Client {
             biased;
             r = failure.changed() => {
                 if r.is_ok() { return Err(failure.borrow().clone().unwrap_or_else(|| Status::cancelled("upload failed"))); }
-                bounded(&cancel, deadline, &mut receive_head).await?
+                call.bounded(&mut receive_head).await?
             }
-            r = bounded(&cancel, deadline, &mut receive_head) => r?,
+            r = call.bounded(&mut receive_head) => r?,
         };
+        call.streaming();
         let (head, stream) = match result {
             Ok(r) => r,
             Err(e) => return Err(failure.borrow().clone().unwrap_or(e)),
@@ -434,7 +409,7 @@ impl Client {
                 .map_err(|_| Status::internal("invalid response status"))?,
         )
         .map_err(|_| Status::internal("invalid response status"))?;
-        let mut response = Response::builder().status(status);
+        let mut response = Response::builder().status(status).extension(call.clone());
         *response.headers_mut().unwrap() = decode_headers(head.headers)?;
         if !head.upgrade.is_empty() && status == http::StatusCode::SWITCHING_PROTOCOLS {
             response = response
@@ -444,13 +419,11 @@ impl Client {
         if head.no_body {
             let mut stream = stream;
             if !matches!(
-                bounded(&cancel, deadline, stream.message())
+                call.bounded(stream.message())
                     .await??
                     .and_then(|p| p.payload),
                 Some(Payload::End(_))
-            ) || bounded(&cancel, deadline, stream.message())
-                .await??
-                .is_some()
+            ) || call.bounded(stream.message()).await??.is_some()
             {
                 return Err(Status::internal("invalid empty response"));
             }
@@ -459,17 +432,9 @@ impl Client {
                 .body(Body::full(Bytes::new()))
                 .map_err(|e| Status::internal(e.to_string()));
         }
-        let receive_cancel = cancel.clone();
+        let receive = call.clone();
         tokio::spawn(async move {
-            if let Err(e) = decode_body(
-                stream,
-                response_tx.clone(),
-                receive_cancel.clone(),
-                deadline,
-                usize::MAX,
-            )
-            .await
-            {
+            if let Err(e) = decode_body(stream, response_tx.clone(), &receive, usize::MAX).await {
                 let e = failure.borrow().clone().unwrap_or(e);
                 let _ = response_tx.send(Err(Box::new(e))).await;
             }
@@ -667,8 +632,9 @@ impl Bridge for Service {
     ) -> Result<tonic::Response<Self::ExchangeStream>, Status> {
         self.authorize(&req)?;
         let cancel = CancellationToken::new();
-        let mut deadline = Instant::now() + Duration::from_millis(self.cfg.timeout_ms);
-        let permit = bounded(&cancel, deadline, self.permits.clone().acquire_owned())
+        let call = Call::start(cancel.clone(), self.cfg.timers());
+        let permit = call
+            .bounded(self.permits.clone().acquire_owned())
             .await?
             .map_err(|_| Status::unavailable("gateway stopped"))?;
         let (out, rx) = mpsc::channel(4);
@@ -678,7 +644,8 @@ impl Bridge for Service {
             _permit: permit,
         };
         let mut stream = req.into_inner();
-        let head = match bounded(&cancel, deadline, stream.message())
+        let head = match call
+            .bounded(stream.message())
             .await??
             .and_then(|p| p.payload)
         {
@@ -690,7 +657,7 @@ impl Bridge for Service {
             }
         };
         if head.timeout_ms != 0 {
-            deadline = deadline.min(Instant::now() + Duration::from_millis(head.timeout_ms));
+            call.shorten(Duration::from_millis(head.timeout_ms));
         }
         let upgrading = !head.upgrade.is_empty();
         let (upload_tx, upload_body) = Body::channel(cancel.clone(), None);
@@ -715,8 +682,7 @@ impl Bridge for Service {
             Some(spawn_decode(
                 incoming.take().unwrap(),
                 upload_tx,
-                cancel.clone(),
-                deadline,
+                call.clone(),
                 self.cfg.max_body_bytes,
             ))
         };
@@ -733,15 +699,16 @@ impl Bridge for Service {
                 biased;
                 changed = errors.changed() => {
                     if changed.is_ok() { return Err(errors.borrow().clone().unwrap_or_else(|| Status::cancelled("upload failed"))); }
-                    bounded(&cancel, deadline, &mut request).await?.map_err(|e| Status::unavailable(format!("backend: {e}")))?
+                    call.bounded(&mut request).await?.map_err(|e| Status::unavailable(format!("backend: {e}")))?
                 }
-                r = bounded(&cancel, deadline, &mut request) => r?.map_err(|e| Status::unavailable(format!("backend: {e}")))?,
+                r = call.bounded(&mut request) => r?.map_err(|e| Status::unavailable(format!("backend: {e}")))?,
             }
         } else {
-            bounded(&cancel, deadline, client.request(request))
+            call.bounded(client.request(request))
                 .await?
                 .map_err(|e| Status::unavailable(format!("backend: {e}")))?
         };
+        call.streaming();
         let tunnel = upgrading && response_head.status() == http::StatusCode::SWITCHING_PROTOCOLS;
         let on_upgrade = tunnel.then(|| hyper::upgrade::on(&mut response_head));
         let head = wire::ResponseHead {
@@ -756,27 +723,19 @@ impl Bridge for Service {
         tokio::spawn(async move {
             let r = match on_upgrade {
                 Some(upgrade) => {
-                    tunnel_backend(
-                        upgrade,
-                        incoming.unwrap(),
-                        out.clone(),
-                        cancel.clone(),
-                        deadline,
-                    )
-                    .await
+                    tunnel_backend(upgrade, incoming.unwrap(), out.clone(), call.clone()).await
                 }
                 None => {
                     let (tx, mut rx) = mpsc::channel(4);
                     let encode = encode_body(
                         Body::new(response_head.into_body()),
                         tx,
-                        cancel.clone(),
-                        deadline,
+                        call.clone(),
                         usize::MAX,
                     );
                     let forward = async {
-                        while let Some(p) = bounded(&cancel, deadline, rx.recv()).await? {
-                            bounded(&cancel, deadline, out.send(Ok(p)))
+                        while let Some(p) = call.bounded(rx.recv()).await? {
+                            call.bounded(out.send(Ok(p)))
                                 .await?
                                 .map_err(|_| Status::cancelled("response cancelled"))?;
                         }
@@ -786,7 +745,7 @@ impl Bridge for Service {
                 }
             };
             if let Err(e) = r {
-                let _ = bounded(&cancel, deadline, out.send(Err(e))).await;
+                let _ = call.bounded(out.send(Err(e))).await;
             }
         });
         Ok(tonic::Response::new(Box::pin(response)))
@@ -797,41 +756,43 @@ async fn tunnel_backend(
     upgrade: hyper::upgrade::OnUpgrade,
     stream: Streaming<Packet>,
     out: mpsc::Sender<Result<Packet, Status>>,
-    cancel: CancellationToken,
-    deadline: Instant,
+    call: Call,
 ) -> Result<(), Status> {
-    let upgraded = bounded(&cancel, deadline, upgrade)
+    let upgraded = call
+        .bounded(upgrade)
         .await?
         .map_err(|e| Status::unavailable(format!("backend upgrade: {e}")))?;
     let (mut rd, mut wr) = tokio::io::split(TokioIo::new(upgraded));
-    let (tx, body) = Body::channel(cancel.clone(), None);
+    let (tx, body) = Body::channel(call.token().clone(), None);
     let mut body = body.without_cancellation();
-    let decode = decode_body(stream, tx, cancel.clone(), deadline, usize::MAX);
+    let decode = decode_body(stream, tx, &call, usize::MAX);
     let up = async {
-        while let Some(frame) = bounded(&cancel, deadline, body.frame()).await? {
+        while let Some(frame) = call.bounded(body.frame()).await? {
             let frame = frame.map_err(|e| Status::cancelled(e.to_string()))?;
             if let Ok(data) = frame.into_data() {
-                bounded(&cancel, deadline, wr.write_all(&data))
+                call.bounded(wr.write_all(&data))
                     .await?
                     .map_err(|e| Status::cancelled(e.to_string()))?;
             }
         }
-        bounded(&cancel, deadline, wr.shutdown())
+        call.bounded(wr.shutdown())
             .await?
             .map_err(|e| Status::cancelled(e.to_string()))
     };
     let down = async {
         let mut buffer = vec![0; CHUNK];
         loop {
-            let n = bounded(&cancel, deadline, rd.read(&mut buffer))
+            let n = call
+                .bounded(rd.read(&mut buffer))
                 .await?
                 .map_err(|e| Status::cancelled(e.to_string()))?;
+            call.touch();
             let payload = if n == 0 {
                 Payload::End(Empty {})
             } else {
                 Payload::Data(Bytes::copy_from_slice(&buffer[..n]))
             };
-            bounded(&cancel, deadline, out.send(Ok(packet(payload))))
+            call.bounded(out.send(Ok(packet(payload))))
                 .await?
                 .map_err(|_| Status::cancelled("tunnel receiver closed"))?;
             if n == 0 {
@@ -842,7 +803,11 @@ async fn tunnel_backend(
     tokio::try_join!(decode, up, down).map(|_| ())
 }
 
-pub async fn serve(cfg: GrpcListener) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Serves until `shutdown`; then stops accepting and lets in-flight calls finish.
+pub async fn serve(
+    cfg: GrpcListener,
+    shutdown: CancellationToken,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let backend = Backend::new(&cfg)?;
     let token = config::token(&cfg.token_env)?;
     let permits = Arc::new(Semaphore::new(cfg.max_in_flight));
@@ -870,9 +835,7 @@ pub async fn serve(cfg: GrpcListener) -> Result<(), Box<dyn std::error::Error + 
                 .max_decoding_message_size(MAX_PACKET)
                 .max_encoding_message_size(MAX_PACKET),
         )
-        .serve_with_shutdown(address, async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .serve_with_shutdown(address, shutdown.cancelled_owned())
         .await?;
     Ok(())
 }

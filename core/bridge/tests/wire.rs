@@ -9,6 +9,7 @@ use minta_gateway::{
 };
 use std::{convert::Infallible, time::Duration};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tonic::Code;
 
 fn packet(payload: Payload) -> Packet {
@@ -50,9 +51,11 @@ async fn protobuf_peer_rejects_incomplete_and_out_of_order_bodies() {
         token_env: None,
         max_body_bytes: 1024,
         timeout_ms: 2000,
+        idle_timeout_ms: 2000,
+        max_duration_ms: 0,
         max_in_flight: 2,
     };
-    let server = tokio::spawn(transport::serve(cfg));
+    let server = tokio::spawn(transport::serve(cfg, CancellationToken::new()));
     let endpoint = format!("http://{address}");
     let mut client = None;
     for _ in 0..100 {

@@ -6,7 +6,7 @@
 
 任何能发送 HTTP 的语言都具备相同能力，无需维护另一份协议栈。Rust、Python、Node、Java/JVM、.NET、Go、C/C++、Fortran、Ruby、PHP、Zig、LuaJIT、Swift、Nim、Dart、Julia、Pascal、D、COBOL、Shell、PowerShell、Perl、Tcl、R、Elixir、Erlang、Haskell、Crystal、Lua、OCaml 等均可使用其 HTTP 库，或者调用 curl。是否有该语言的 gRPC/QUIC 库不影响接入。
 
-`examples/http` 包含六种语言的无 MINTA 依赖客户端，也可从 OpenAPI 生成其它语言的 HTTP 客户端。旧 `native`/`bindings` 继续连接 BEEP。旧 `sdk` 的普通 HTTP 成功请求可复用，但 BEEP 专有错误码、SASL、管理接口不属于新 API；新应用使用标准 HTTP 状态与 JSON 错误。
+`examples/http` 包含六种语言的无 MINTA 依赖客户端，也可从 OpenAPI 生成其它语言的 HTTP 客户端。旧 `native`/`bindings` 继续连接 BEEP（已弃用，迁移见 [MIGRATION.md](MIGRATION.md)）。旧 `sdk` 的普通 HTTP 成功请求可复用，但 BEEP 专有错误码、SASL、管理接口不属于新 API；新应用使用标准 HTTP 状态与 JSON 错误。
 
 ## 普通 HTTP
 
@@ -58,11 +58,25 @@
 
 两侧 `max_body_bytes` 分别限制请求体累计字节数，默认 64 MiB。已知长度、chunked、JSON/base64 均执行限制，JSON 另有编码层大小保护。大上传需要同时调高两侧配置；升级后的 WebSocket 隧道不受上传大小限制。
 
-`max_response_bytes` 只限制 `/v1/call` 缓冲应答，默认 64 MiB。普通 HTTP 响应按块转发。两侧 `max_in_flight` 默认 64；额度随调用/应答体生命周期释放，排队受调用截止时间约束。
+`max_response_bytes` 只限制 `/v1/call` 缓冲应答，默认 64 MiB。普通 HTTP 响应按块转发。两侧 `max_in_flight` 默认 64；额度随调用/应答体生命周期释放，排队计入 `timeout_ms`。
 
 网关间所有调用共用一条 HTTP/2 连接。网关拥有的每一跳（h2c 入口、网关间 gRPC、h2c/h2 后端）每个流的接收窗口为 1 MiB，连接窗口覆盖全部并发流的窗口之和：读得慢或不读的客户端/后端只占住自己那个流，不会冻结同一连接上的其它调用。最坏情况下每条连接缓冲 `max_in_flight` × 1 MiB。
 
-`timeout_ms` 默认 60000（60 秒），覆盖调用及其流的总时长；调用者只能指定更短时间，后端网关也有自身上限。长连接须调高两侧配置。断开连接、丢弃 body、超时会取消对应 gRPC 流并停止后端 I/O。内部协议要求显式 End，缺失 End 视为中止，不能当作成功的短请求/应答。
+每个调用有三个计时器，两侧网关各自执行：
+
+| 设置 | 默认 | 含义 |
+|---|---|---|
+| `timeout_ms` | 60000 | 收到应答头之前，调用最多这么久没有进展。上传每动一次都重新计时，所以大文件慢慢传不会超时，后端在最后一个字节之后有这么久作答。 |
+| `idle_timeout_ms` | 300000 | 收到应答头之后，两个方向这么久都没有数据就断开。流式响应、gRPC 流和 WebSocket 隧道只要在用就一直保持。 |
+| `max_duration_ms` | 0（不限） | 整个调用的硬上限，到点即断。 |
+
+调用者可以用 `X-Minta-Timeout-Ms` 缩短 `timeout_ms`，不能延长；`/v1/call` 的 `timeout_ms` 是整个缓冲调用的总时长。WebSocket 若可能长时间静默，应让应用发心跳，或调高两侧 `idle_timeout_ms`。断开连接、丢弃 body、超时会取消对应 gRPC 流并停止后端 I/O；被取消的上传或应答对读方表现为出错，不会被当成完整的短 body。内部协议要求显式 End，缺失 End 视为中止。
+
+入口要求客户端在 `header_timeout_ms`（默认 30000）内发完 HTTP/1.1 请求头，否则断开连接，防止慢速发送请求头长期占用连接。
+
+## 停止与重启
+
+收到 SIGINT/SIGTERM（Windows 上为 Ctrl-C/Ctrl-Break）后，网关立即停止接受新连接，`/readyz` 返回 503 `draining`，正在处理的调用有 `shutdown_grace_ms`（默认 20000，TOML 顶层或 `--shutdown-grace-ms`）完成，随后退出（退出码 0）。宽限期结束仍未完成的调用会被中止；入口侧已升级的 WebSocket 隧道不在等待范围内，退出时断开。容器编排的终止宽限期应大于该值。
 
 ## TLS 与内部认证
 
@@ -76,7 +90,7 @@ mintagw proxy --upstream https://bridge.internal:10290 --ca-file ca.pem \
   --token-env MINTA_INTERNAL_TOKEN
 ```
 
-支持 HTTPS 后端与 `--backend-ca-file` 私有 CA。入口默认仅监听 loopback；对外 HTTPS、用户级认证或限流可用标准 HTTP 反向代理。`/healthz` 检查进程，`/readyz` 验证配置的 gRPC 对端连接与 token，不探测应用健康路径。
+支持 HTTPS 后端与 `--backend-ca-file` 私有 CA。入口默认仅监听 loopback；对外 HTTPS、用户级认证或限流可用标准 HTTP 反向代理。`/healthz` 检查进程，`/readyz` 验证配置的 gRPC 对端连接与 token（停止过程中返回 503），不探测应用健康路径。
 
 ## 验证与兼容
 

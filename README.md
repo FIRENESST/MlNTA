@@ -43,7 +43,7 @@ curl -H 'Content-Type: application/json' \
 
 普通 HTTP 路径支持流式上传/响应、trailer、gRPC 四种调用模式和 HTTP/1.1 WebSocket Upgrade。`/v1/call` 是有大小上限的缓冲 JSON API。请求体限制在两侧各自生效，默认 64 MiB；大上传需调高两侧 `--max-body-bytes`。JSON 响应另有 `--max-response-bytes` 限制。
 
-`--timeout-ms` 默认 60000（60 秒），是调用及其流的总时长；长连接应调高两侧配置。断开连接/丢弃应答会取消相应 gRPC 流，释放并发额度并终止后端 I/O。HTTP 入口支持 HTTP/1.1、h2c，入口 HTTPS 可由标准反向代理终结；内部 gRPC 支持 TLS/证书验证和可选 Bearer 认证。
+超时按进展计：`--timeout-ms`（默认 60 秒）是收到应答头前允许的无进展时间，上传在动就不会超时；之后 `--idle-timeout-ms`（默认 300 秒）内两个方向都没有数据才断开，流和 WebSocket 只要在用就一直保持；`--max-duration-ms` 可选设置硬上限。收到 SIGTERM/Ctrl-C 后停止接受新连接，正在处理的调用有 `--shutdown-grace-ms`（默认 20 秒）完成。断开连接/丢弃应答会取消相应 gRPC 流，释放并发额度并终止后端 I/O。HTTP 入口支持 HTTP/1.1、h2c，入口 HTTPS 可由标准反向代理终结；内部 gRPC 支持 TLS/证书验证和可选 Bearer 认证。
 
 ```sh
 cargo test --manifest-path core/Cargo.toml --workspace --locked
@@ -58,9 +58,9 @@ python tests/run_all.py --build
 
 ---
 
-# BEEP 兼容接口
+# BEEP 兼容接口（已弃用）
 
-以下 `beepgw`、`native/`、`bindings/` 和 `sdk/` 接口保留供现有应用使用；新集成优先使用上面的 HTTP/JSON 入口。
+> **已弃用。** 以下 `beepgw`、`native/`、`bindings/`、`sdk/` 与 C ABI 进入维护期：只修缺陷和安全问题，不再增加功能，计划在之后的主版本移除。现有部署继续可用；新集成请使用上面的 HTTP/JSON 入口，迁移步骤与对照表见 [docs/MIGRATION.md](docs/MIGRATION.md)。
 
 把**几乎任何编程语言**的后端请求对接到 **RFC 3080/3081 BEEP** 传输层的适配器套件。
 

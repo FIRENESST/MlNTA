@@ -8,6 +8,7 @@ Only the gRPC/WebSocket application tests require tests/requirements.txt.
 Missing optional language tools are reported as SKIP; --strict requires grpcio/websockets.
 """
 import argparse
+import asyncio
 import base64
 import concurrent.futures
 import datetime
@@ -17,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -47,7 +49,8 @@ def port():
 def process(args, ready, env=None):
     log = tempfile.TemporaryFile()
     LOGS.append(log)
-    child = subprocess.Popen([str(x) for x in args], stdout=log, stderr=subprocess.STDOUT, env={**os.environ, **(env or {})})
+    group = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    child = subprocess.Popen([str(x) for x in args], stdout=log, stderr=subprocess.STDOUT, env={**os.environ, **(env or {})}, creationflags=group)
     PROCESSES.append(child)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -161,6 +164,17 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(0.01)
             finally:
                 with LOCK: ACTIVE_STREAMS -= 1
+        if path in ("/drip", "/drip-pause"):
+            # /drip moves a chunk every 150 ms; /drip-pause goes quiet for 3 s mid-stream.
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for i in range(8 if path == "/drip" else 2):
+                self.wfile.write(b"5\r\ndrip\n\r\n")
+                self.wfile.flush()
+                time.sleep(0.15 if path == "/drip" else 3)
+            self.wfile.write(b"0\r\n\r\n")
+            return
         if path == "/trailers":
             self.send_response(200)
             self.send_header("Transfer-Encoding", "chunked")
@@ -366,6 +380,81 @@ def main():
             assert request(pp, "/v2inspect")[2] == b"hello"
         check("TOML configuration and path routing", routes)
 
+        def timers():
+            # timeout_ms bounds only the wait without progress; moving calls outlive it.
+            quick, _ = chain(backend, timeout=400)
+            started = time.monotonic()
+            assert request(quick, "/drip")[2] == b"drip\n" * 8
+            assert time.monotonic() - started > 0.9
+
+            def slow_upload():
+                for _ in range(8):
+                    time.sleep(0.15)
+                    yield b"x" * 1000
+            started = time.monotonic()
+            assert request(quick, "/echo", slow_upload(), "POST", chunks=True)[2] == b"x" * 8000
+            assert time.monotonic() - started > 1.1
+            assert request(quick, "/slow")[0] == 504  # 1 s without progress before the head
+            # idle_timeout_ms ends a stream that stops moving.
+            idle = ("--idle-timeout-ms", "300")
+            quiet, _ = chain(backend, timeout=400, extra=idle, client_extra=idle)
+            started = time.monotonic()
+            try: request(quiet, "/drip-pause")
+            except (http.client.HTTPException, OSError): pass
+            else: raise AssertionError("an idle stream was not cut")
+            assert time.monotonic() - started < 2.5
+            # max_duration_ms caps even a busy stream.
+            cap = ("--max-duration-ms", "700")
+            capped, _ = chain(backend, extra=cap, client_extra=cap)
+            started = time.monotonic()
+            c = http.client.HTTPConnection("127.0.0.1", capped, timeout=5)
+            try:
+                c.request("GET", "/forever")
+                r = c.getresponse()
+                while r.read(4096): pass
+            except (http.client.HTTPException, OSError): pass
+            finally: c.close()
+            assert time.monotonic() - started < 2.5
+            until = time.monotonic() + 2
+            while time.monotonic() < until:
+                with LOCK:
+                    if ACTIVE_STREAMS == 0: break
+                time.sleep(0.02)
+            with LOCK: assert ACTIVE_STREAMS == 0, "capped stream kept running at the backend"
+            # A client that never finishes its request head is disconnected.
+            slowhead, _ = chain(backend, client_extra=("--header-timeout-ms", "500"))
+            started = time.monotonic()
+            with socket.create_connection(("127.0.0.1", slowhead)) as sock:
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n")
+                sock.settimeout(5)
+                try:
+                    while sock.recv(4096): pass
+                except ConnectionError: pass
+            assert time.monotonic() - started < 2.5
+        check("progress, idle and maximum-duration timers; request-head timeout", timers)
+
+        def graceful():
+            # SIGTERM (Ctrl-Break on Windows): stop accepting, finish in-flight calls, exit 0.
+            pg, ph = port(), port()
+            grace = ("--shutdown-grace-ms", "5000")
+            expose = process([GW, "expose", "--listen", f"127.0.0.1:{pg}", "--backend", backend, *grace], pg)
+            proxy = process([GW, "proxy", "--listen", f"127.0.0.1:{ph}", "--upstream", f"http://127.0.0.1:{pg}", *grace], ph)
+            result = {}
+            worker = threading.Thread(target=lambda: result.update(r=request(ph, "/slow")))
+            worker.start()
+            time.sleep(0.3)
+            stop = signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM
+            proxy.send_signal(stop)
+            expose.send_signal(stop)
+            worker.join(10)
+            assert result.get("r", (None,))[0] == 200 and result["r"][2] == b"late", result
+            assert proxy.wait(timeout=5) == 0 and expose.wait(timeout=5) == 0
+            try:
+                socket.create_connection(("127.0.0.1", ph), timeout=1).close()
+            except OSError: pass
+            else: raise AssertionError("a stopped gateway still accepts connections")
+        check("graceful shutdown drains in-flight calls", graceful)
+
         clients = ROOT / "examples/http"
         env = {"MINTA_GATEWAY": f"http://127.0.0.1:{ph}"}
         check("Python standard-library HTTP/JSON client", lambda: run_client([sys.executable, clients / "client.py"], env))
@@ -399,6 +488,33 @@ def main():
                 address = f"127.0.0.1:{edge}" if scheme == "h2c" else f"ws://127.0.0.1:{edge}/chat"
                 run_client([sys.executable, ROOT / "tests" / script, "client", address])
             check(name, application)
+
+        if importlib.util.find_spec("websockets"):
+            def ws_lifetime():
+                import websockets
+
+                async def session(url, quiet, survives):
+                    async with websockets.connect(url, open_timeout=10, ping_interval=None) as ws:
+                        await ws.send("a")
+                        assert await asyncio.wait_for(ws.recv(), 5) == "a"
+                        await asyncio.sleep(quiet)
+                        try:
+                            await ws.send("b")
+                            assert await asyncio.wait_for(ws.recv(), 5) == "b"
+                        except websockets.ConnectionClosed:
+                            assert not survives, "tunnel closed while within its idle timeout"
+                        else:
+                            assert survives, "an idle tunnel was not closed"
+
+                pb = port()
+                process([sys.executable, ROOT / "tests" / "ws_test.py", "serve", pb], pb)
+                # Quiet longer than timeout_ms but shorter than the idle timeout: stays open.
+                edge, _ = chain(f"http://127.0.0.1:{pb}", timeout=400)
+                asyncio.run(session(f"ws://127.0.0.1:{edge}/chat", 1.0, True))
+                idle = ("--idle-timeout-ms", "500")
+                edge, _ = chain(f"http://127.0.0.1:{pb}", timeout=400, extra=idle, client_extra=idle)
+                asyncio.run(session(f"ws://127.0.0.1:{edge}/chat", 1.5, False))
+            check("WebSocket tunnels live while used and close when idle", ws_lifetime)
 
         if importlib.util.find_spec("cryptography"):
             def tls_auth():
